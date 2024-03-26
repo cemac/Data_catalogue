@@ -1,5 +1,6 @@
 # Data_catalogue
 A cataloguer of netcdf/hdf5 files in a directory. Includes code to build a sqlite3 database of metadata and code to run a GUI to explore the database.
+
 build_metadata_db.py contains the code to build the database and is run as 
 python build_metadata_db.py <indir> <ftype> <dbpathname> -v
 where <indir> is the directory you want to catalogue and dbpathname is the full pathname of the database file to create
