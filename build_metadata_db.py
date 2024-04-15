@@ -28,27 +28,101 @@ import pdb
 from netCDF4 import Dataset, num2date, date2num
 from db_functions import *
 
+
+#-----------------------------------------------------------------------------------------------------------------
+# Function to check whether this_coord already exists (doesn't need to match cid but should match everything else
+# if it doesn't exist then add it to coord list with next available cid and insert into database
+# inputs:
+#    this_coord - the new coordinate we need to match or create (does not have a valid cid)
+#    coords - a list of the coords we have created so far in which to find a matching coord
+#    cur - a cursor to the database so we can insert any new coord into the database
+#    con - a connection to database so we can commit changes
+#    verbose - control printing
+#-----------------------------------------------------------------------------------------------------------------
+def create_or_find_matching_coord(this_coord, coords, cur, con, verbose):
+
+    existing_coord_names=np.asarray([coord.name for coord in coords])
+    # do we already have this coordinate
+    matches=False
+    ix=np.where(existing_coord_names==this_coord.name)
+    for i in ix[0]:
+        matches=coords[i].matches_coord(this_coord)
+        if matches:
+            this_coord=coords[i]
+            this_cid=this_coord.cid
+            if verbose:
+                print('matching coordinate exists', this_coord.name, this_coord.cid)
+            break
+    if matches==False:
+        # we don't have it so append it to coords list and store it in the database
+        ncoords=len(coords)
+        this_cid=ncoords
+        this_coord.cid=this_cid
+        coords.append(this_coord)
+        this_coord.insert_into_database(cur,verbose)
+        con.commit()
+
+
+    return this_cid
+
+#-----------------------------------------------------------------------------------------------------------------
+# Function to check whether this_var already exists
+# if it doesn't exist then add it to variables list with next available vid
+# if it does then copy the fid and cid of this_var into the matching variable
+# Note we cannot add this_var to the database until the end when we have added all the fid cid pairs
+# inputs:
+#    this_var - the new variable we need to match or create (does not have a valid vid)
+#    variables - a list of the variables we have created so far in which to find a matching variable
+#    verbose - control printing
+#-----------------------------------------------------------------------------------------------------------------
+def create_or_find_matching_variable(this_var, variables, verbose):
+
+    existing_var_names=np.asarray([var.name for var in variables])
+    # do we already have this variable
+    matches=False
+    ix=np.where(existing_var_names==this_var.name)
+    for i in ix[0]:
+        matches=variables[i].matches_variable(this_var)
+        if matches:
+            variables[i].copy_fid_cids_from_other(this_var)
+            this_var=[]
+            this_var=variables[i]
+            if verbose:
+                print('matching variable exists', this_var.name, this_var.vid)
+            break
+
+    if matches==False:
+        # add the new variable
+        nvars=len(variables)
+        this_var.vid=nvars
+        variables.append(this_var)
+        if verbose:
+            print('new variable', this_var.name, this_var.vid)
+
+
 #-----------------------------------------------------------------------------------
 # Adds to database the metadata from one netcdf file.
 # This will create the entry for the file in the Files table and entries for any coords in the Coords table
 # Any variables will be held in the variables list but cannot be added to the database until we have read
 # all files and set up all the cids and fids.
-#
 # inputs:
-#    dirpath - directory of file
-#    filename - fiename of file
+#    this_dir - Directory instance holding info about directory in which this file exists
+#    filename - filename of file to read
 #    fid - is the id for the file we are reading
 #    coords - a list of the coords we have created so far
 #    variables - a list of the variables we have created so far
 #    cur - a cursor to the database
+#    con - a connection to the database
 #    update - allow updates to database - NOT YET IMPLEMENTED
 #    verbose - control printing
+#
 # returns:
 #    ok=True/False - indicates whether we could read the file
 #-----------------------------------------------------------------------------------
-def read_netcdf(dirpath, filename, fid, coords, variables, cur, update, verbose):
+def read_netcdf(this_dir, filename, fid, coords, variables, cur, con, update, verbose):
+
     ok=False
-    filepath=get_filepath(dirpath,filename)
+    filepath=get_filepath(this_dir.dirpath, filename)
 
     try:
         if verbose:
@@ -60,45 +134,30 @@ def read_netcdf(dirpath, filename, fid, coords, variables, cur, update, verbose)
         warnings.warn('cannot read file {filename}, error={err}'.format(filename=filename, err=err), UserWarning)
         return ok
 
-    this_file=File_metadata(fid, dirpath, filename)
+    this_file=File_metadata(fid, this_dir.did, this_dir.dirpath, filename)
     # get the global attributes
     for attrname in data.ncattrs():
         value=getattr(data, attrname)
         this_file.add_attribute(attrname,value)
 
     this_file.insert_into_database(cur,verbose) # we can insert the file entry into the database
+    con.commit()
 
-    ncoords=len(coords)
-    exisiting_coord_names=np.asarray([coord.name for coord in coords])
-    # get the coords from this file
-    this_cixes=[]
+    # get the coords from this file - remember the cids and dimnames to match with the variables
+    this_cids=[]
     this_dimnames=[]
-    nvars=len(variables)
     for d in data.dimensions:
         # read the information about this coordinate by creating a coordinate instance
-        this_coord=Coord_metadata(ncoords, d, data[d][:])
+        this_coord=Coord_metadata(UNKNOWN_ID, d, data[d][:])
         for attrname in data[d].ncattrs():
             value=getattr(data[d], attrname)
             this_coord.add_attribute(attrname,value)
-        # do we already have this coordinate
-        matches=False
-        for c in range(ncoords):
-            matches=coords[c].matches_coord(this_coord)
-            if matches:
-                break
-        if matches==False:
-            # we don't have it so append it to coords list and store it in the database
-            coords.append(this_coord)
-            this_cixes.append(ncoords)
-            ncoords=ncoords+1
-            this_coord.insert_into_database(cur,verbose)
-        else:
-            this_cixes.append(c)
-            if verbose:
-                print('matching coordinate exists', d, c, coords[c].cid)
-        this_dimnames.append(d)
 
+        this_cid=create_or_find_matching_coord(this_coord, coords, cur, con, verbose)
+        this_cids.append(this_cid)
+        this_dimnames.append(d)
     this_dimnames=np.asarray(this_dimnames)
+
     # get the variable names that are not in dimensions
     for v in data.variables:
         is_dim=False
@@ -109,7 +168,7 @@ def read_netcdf(dirpath, filename, fid, coords, variables, cur, update, verbose)
         if is_dim==False:
             # this is a proper variable so create a variable instance
             ndims=len(data[v].dimensions)
-            this_var=Variable_metadata(nvars,v,ndims)
+            this_var=Variable_metadata(UNKNOWN_ID,v,ndims)
             # add this variables attributes
             for attrname in data[v].ncattrs():
                 value=getattr(data[v], attrname)
@@ -122,34 +181,12 @@ def read_netcdf(dirpath, filename, fid, coords, variables, cur, update, verbose)
                 if len(cdix[0])==0:
                     print('cannot find dimname', dimname)
                     pdb.set_trace()
-                cid=coords[this_cixes[cdix[0][0]]].cid
+                cid=this_cids[cdix[0][0]]
                 this_var.add_cid(dix,cid)
-
                 dix=dix+1
+            create_or_find_matching_variable(this_var, variables, verbose)             
 
-            # do we already have this variable
-            matches=False
-            for vix in range(nvars):
-                matches=variables[vix].matches_variable(this_var)
-                if matches:
-                    break
-
-            if matches==False:
-                if verbose:
-                    print('new variable', v, this_var.vid)
-                variables.append(this_var)
-                # we cannot add this to the database until the end when we have added all the fid cid pairs
-                nvars=nvars+1
-            else:
-                variables[vix].copy_fid_cids_from_other(this_var)
-                this_var=[]
-                this_var=variables[vix]
-                if verbose:
-                    print('matching variable exists', v, this_var.vid)
-
-             
-
-    return ok, ncoords, nvars
+    return ok
 
 #-----------------------------------------------------------------------------------
 # Add to database the metadata from one hdf5 file
@@ -165,22 +202,21 @@ import h5py
 #    group is the data at this level of the hierarchy
 #    coords - a list of the coords we have created so far
 #    variables - a list of the variables we have created so far
-#    coord_names - the names of keys that are coordinates rather than variables as given by the user
+#    hdf5_coord_names - the names of keys that are coordinates rather than variables as given by the user
 #    cur - a cursor to the database
+#    con - a connection to the database
 #    update - allow updates to database - NOT YET IMPLEMENTED
 #    verbose - control printing
 #-----------------------------------------------------------------------------------
-def read_keys(fid, group, coords, variables, coord_names, cur, update, verbose):
+def read_keys(fid, group, coords, variables, hdf5_coord_names, cur, con, update, verbose):
     keys=group.keys()
     print(keys)
     this_coord_cids=[]
     this_coord_names=[]
-    next_cid=len(coords)
-    next_vid=len(variables)
 
     # look for any coordinate data first
     key_names=np.asarray([key for key in keys])
-    for name in coord_names:
+    for name in hdf5_coord_names:
         kix=np.where(np.asarray(key_names)==name)
         if len(kix[0])>0:
             key=key_names[kix[0][0]]
@@ -189,8 +225,7 @@ def read_keys(fid, group, coords, variables, coord_names, cur, update, verbose):
             if isinstance(this_group, h5py._hl.dataset.Dataset):
                 atts=dict(this_group.attrs)
                 if key in coord_names:
-                    this_coord=Coord_metadata(next_cid, key, this_group)
-                    print(key, 'is coord with cid', next_cid)
+                    this_coord=Coord_metadata(UNKNOWN_ID, key, this_group)
                     for attrname in atts:
                         value=atts.get(attrname)
                         if isinstance(value, bytes):
@@ -199,20 +234,8 @@ def read_keys(fid, group, coords, variables, coord_names, cur, update, verbose):
                             #print('coord attribute:',attrname, value)
                             this_coord.add_attribute(attrname, value)
 
-                    # have we already got this coordinate?
-                    matches=False
-                    for c in range(len(coords)):
-                        matches=coords[c].matches_coord(this_coord)
-                        if matches:
-                            break
-                    if matches:
-                        this_coord_cids.append(coords[c].cid)
-                        print('coord matches', coords[c].cid)
-                    else:
-                        this_coord_cids.append(next_cid)
-                        coords.append(this_coord)
-                        next_cid=next_cid+1
-                        this_coord.insert_into_database(cur,verbose)
+                    this_cid=create_or_find_matching_coord(this_coord, coords, cur, con, verbose)
+                    this_coord_cids.append(this_cid)
                     this_coord_names.append(key)
 
     # now look at all the other keys
@@ -223,7 +246,7 @@ def read_keys(fid, group, coords, variables, coord_names, cur, update, verbose):
             if isinstance(this_group, h5py._hl.dataset.Dataset):
                 # this must be a variable
                 ndims=len(this_group.shape)
-                this_var=Variable_metadata(next_vid,this_group.name,ndims)
+                this_var=Variable_metadata(UNKNOWN_ID,this_group.name,ndims)
                 this_var.add_fid(fid)
                 print(key, 'is variable with shape', this_group.shape)
                 atts=dict(this_group.attrs)
@@ -270,29 +293,11 @@ def read_keys(fid, group, coords, variables, coord_names, cur, update, verbose):
                 if len(dix[0])>0:
                     print('have not found all cordinates for variable',key)
 
-                # do we already have this variable
-                matches=False
-                for vix in range(len(variables)):
-                    matches=variables[vix].matches_variable(this_var)
-                    if matches:
-                        break
-
-                if matches==False:
-                    if verbose:
-                        print('new variable', key, this_var.vid)
-                    variables.append(this_var)
-                    # we cannot add this to the database until the end when we have added all the fid cid pairs
-                    next_vid=next_vid+1
-                else:
-                    variables[vix].copy_fid_cids_from_other(this_var)
-                    this_var=[]
-                    this_var=variables[vix]
-                    if verbose:
-                        print('matching variable exists', key, this_var.vid)
+                create_or_find_matching_variable(this_var, variables, verbose)             
 
             elif isinstance(this_group,h5py._hl.group.Group):
                 # this is a group
-                read_keys(fid,this_group, coords, variables, coord_names, cur, update, verbose)
+                read_keys(fid,this_group, coords, variables, hdf5_coord_names, cur, update, verbose)
             else:
                 print('what is this?')
                 pdb.set_trace()
@@ -305,21 +310,23 @@ def read_keys(fid, group, coords, variables, coord_names, cur, update, verbose):
 # This will create the entry for the file in the Files table and calls read_keys to descend the hierarchy
 # to read any coordinates and variables
 # inputs:
-#    dirpath - directory of file
-#    filename - fiename of file
+#    this_dir - Directory instance holding info about directory in which this file exists
+#    filename - filename of file to read
 #    fid - is the id for the file we are reading
 #    coords - a list of the coords we have created so far
 #    variables - a list of the variables we have created so far
+#    hdf5_coord_names - the names of keys that are coordinates rather than variables as given by the user
 #    cur - a cursor to the database
+#    con - connection to the database
 #    update - allow updates to database - NOT YET IMPLEMENTED
 #    verbose - control printing
 # returns:
 #    ok=True/False - indicates whether we could read the file
 #-----------------------------------------------------------------------------------
-def read_hdf5(dirpath, filename, fid, coords, variables,  cur, coord_names, update, verbose):
+def read_hdf5(this_dir, filename, fid, coords, variables, hdf5_coord_names, cur, con, update, verbose):
 
     ok=False
-    filepath=get_filepath(dirpath,filename)
+    filepath=get_filepath(this_dir.dirpath, filename)
 
     try:
         if verbose:
@@ -329,36 +336,39 @@ def read_hdf5(dirpath, filename, fid, coords, variables,  cur, coord_names, upda
 
     except OSError as err:
         warnings.warn('cannot read file {filename}, error={err}'.format(filename=filename, err=err), UserWarning)
-        print('cannot read file {filename}, error={err}'.format(filename=filename, err=err))
         return False
 
-    this_file=File_metadata(fid, dirpath, filename)
+    this_file=File_metadata(fid, this_dir.did, this_dir.dirpath, filename)
     # get the global attributes
     atts = dict(group.attrs)
     for attrname in atts:
         value=atts.get(attrname).decode()
         this_file.add_attribute(attrname,value)
 
+    # store file entry in database
     this_file.insert_into_database(cur,verbose)
-    read_keys(fid, group, coords, variables, coord_names, cur, update, verbose)
+    con.commit()
+
+    read_keys(this_fid, group, coords, variables, hdf5_coord_names, cur, con, update, verbose)
+
     return ok
+
+
 
 #-----------------------------------------------------------------------------------
 # code to build the database from the metadata of files of type ftype in basedir
 # inputs:
 #    basedir: the base directory to trawl
 #    ftype: the type of files to read (currently netcdf (nc) and hdf5 (hdf5) is supported)
-#           for nc we will only open files with .nc extension
-#           
-#    dbname: the name of the database (full path)
-#    coord_names - a list of the names of keys in hdf5 files that are actually coordinates
+#    dbname: the full path and filename of the database
+#    hdf5_coord_names - a list of the names of keys in hdf5 files that are actually coordinates
 #                  must be given for hdf5 but ignored for nc
 #    update: if True, check all the file dates and if the file is not in the database
 #               then add data from the file as new content, or if the date has changed
-#               then update the records for this file - not yet implemented 
-#
+#               then update the records for this file - not yet implemented
+#    verbose - control 
 # -----------------------------------------------------------------------------------
-def build_db(basedir, ftype, dbname, coord_names, update,verbose):
+def build_db(basedir, ftype, dbname, hdf5_coord_names, update, verbose):
 
     # open the database dbname - this will create it if it does not exist
     con = sqlite3.connect(dbname)
@@ -382,20 +392,27 @@ def build_db(basedir, ftype, dbname, coord_names, update,verbose):
 
     if db_exists==False:
         create_tables(cur)
-    
-    nfiles=0
-    coords=[]
-    variables=[]
 
     # extension may be in capitals or lower case and for hdf5 allow hdf5, HDF5, hdf and HDF
     if ftype=='hdf5':
         allowed_extension=[ftype, ftype.upper(), 'hdf', 'HDF']
     else:
         allowed_extension=[ftype, ftype.upper()]
+
+    ndirs=0    
+    nfiles=0
+    coords=[]
+    variables=[]
+
     # now trawl through the directory structure from basedir
     if verbose:
         print('trawling directory', basedir, 'for', ftype)
     for dirpath, dirnames, filenames in os.walk(basedir):
+
+        this_dir=Directory(ndirs,dirpath)
+        this_dir.insert_into_database(cur,verbose)
+        con.commit()
+        ndirs=ndirs+1
 
         for filename in filenames:
             wsplit=filename.split('.')
@@ -403,9 +420,9 @@ def build_db(basedir, ftype, dbname, coord_names, update,verbose):
                 if wsplit[-1] in allowed_extension:
 
                     if ftype=='nc':
-                        ok=read_netcdf(dirpath, filename, nfiles, coords, variables, cur, update, verbose)
+                        ok=read_netcdf(this_dir, filename, nfiles, coords, variables, cur, con, update, verbose)
                     else:
-                        ok=read_hdf5(dirpath, filename, nfiles, coords, variables, cur, coord_names, update, verbose)
+                        ok=read_hdf5(this_dir, filename, nfiles, coords, variables, hdf5_coord_names, cur, con, update, verbose)
 
                     if ok:
                         nfiles=nfiles+1
@@ -414,7 +431,9 @@ def build_db(basedir, ftype, dbname, coord_names, update,verbose):
         this_var.insert_into_database(cur,verbose)
     # commit the changes
     con.commit()
-    print(nfiles, 'Files', len(coords), 'Coords and', len(variables), 'Variables created')
+    con.close()
+
+    print(ndirs, 'Directories', nfiles, 'Files', len(coords), 'Coords and', len(variables), 'Variables created')
 
 # -----------------------------------------------------------------------------------
 # main - read the arguments and call build_db
@@ -431,25 +450,27 @@ def main():
             print('unknown filetype', ftype)
             exit()
 
-        dbname=sys.argv[3]
         update=False
         verbose=False
-        coord_names=[]
+        dbname=sys.argv[3]
+        hdf5_coord_names=[]  # a list of the names of keys in hdf5 files that are actually coordinates
+                             # must be given for hdf5 but ignored for nc
         for i in range(4,len(sys.argv)):
             if sys.argv[i]=='-u':
                 update=True
             elif sys.argv[i]=='-v':
                 verbose=True
             else:
-                coord_names.append(sys.argv[i])
-        if len(coord_names)==0 and ftype=='hdf5':
+                hdf5_coord_names.append(sys.argv[i])
+
+        if len(hdf5_coord_names)==0 and ftype=='hdf5':
             print('coordinate names must be given')
             exit()
 
         if update==True:
             print('update not yet implemented')
 
-    build_db(basedir, ftype, dbname, coord_names, update, verbose)
+    build_db(basedir, ftype, dbname, hdf5_coord_names, update, verbose)
 
 
 

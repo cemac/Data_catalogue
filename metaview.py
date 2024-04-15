@@ -27,6 +27,20 @@ def set_dirname(d):
         results['state']='normal'
         results.delete("1.0",END)
         results['state']='disabled'
+        if files_metadata.get_nfiles()>0:
+            files_metadata.clear()
+
+#----------------------------------------------------
+# Filename button has been used to select files
+#----------------------------------------------------
+def set_filename(d):
+
+    results['state']='normal'
+    results.delete("1.0",END)
+    results['state']='disabled'
+    if files_metadata.get_nfiles()>0:
+        files_metadata.clear()
+    return True
 
 #----------------------------------------------------
 # Variable button has been used to select variable
@@ -158,28 +172,29 @@ def popupCoordDetails(event,coord_tag,cix):
 # We need to show them in order because there is no guarantee the coordinates will have
 # been added to the database in order
 #------------------------------------------------------------------------------------
-def popupMultiCoordDetails(event,tag,vix):
+def popupMultiCoordDetails(event,tag,vix,d):
     # show the ranges of the dimension of the variable that has multiple coordinates
     nlines=0
     lines=[]
     max_line_len=0
     # get which dimension has multiple files
-    d=active_variables[vix].get_multi_file_dimension()
     this_fixes=np.where(active_variables[vix].allowed_fids==1)
+    this_fids=active_variables[vix].fids[this_fixes[0]]
     this_cids=np.asarray(active_variables[vix].cids[d])
     this_cids=this_cids[this_fixes[0]]
-    this_fids=active_variables[vix].fids[this_fixes[0]]
-    # show the coords and files in ascending order by coord min_val
-    min_vals=np.asarray([coords[cix].get_min_max_delta()[0] for cix in this_cids])
-    ix=np.argsort(min_vals)
-    this_cids=this_cids[ix]
-    this_fids=this_fids[ix]
+    if len(this_fids)>1:
+        # show the coords and files in ascending order by coord min_val
+        min_vals=np.asarray([coords[cix].get_min_max_delta()[0] for cix in this_cids])
+        ix=np.argsort(min_vals)
+        this_cids=this_cids[ix]
+        this_fids=this_fids[ix]
+
     for c in range(len(this_cids)):
         cix=this_cids[c]
         coord_str, this_nlines,this_max_line_len=coords[cix].get_min_max_delta_str()
         fid=this_fids[c]
         this_file=files_metadata.get_matching_fid(fid)
-        pathname=this_file.get_filepath()
+        pathname=get_filepath(all_dirpaths[this_file.did],this_file.filename)
         text_str=coord_str+' in '+pathname+'\n'
         this_max_line_len=this_max_line_len+len(pathname)+1
         nlines=nlines+this_nlines
@@ -208,7 +223,9 @@ def popupMultiCoordDetails(event,tag,vix):
 def popupFileDetails(event,file_tag,fid):
 
     this_file=files_metadata.get_matching_fid(fid)
-    file_str, nlines,max_line_len=this_file.get_file_info_str()
+    dirpath=all_dirpaths[this_file.did]
+
+    file_str, nlines,max_line_len=this_file.get_file_info_str(dirpath)
     info_window = Tk()
     info_window.overrideredirect(1)
     info_window.geometry("+{0}+{1}".format(event.x_root+6, event.y_root+2))
@@ -231,23 +248,27 @@ def popupFilesDetails(event,file_tag,vix):
     max_line_len=0
     # we need to get the coord min and max to be able to order the files even though we wont display anything
     # about the coord
-    # get which dimension has multiple files
-    d=active_variables[vix].get_multi_file_dimension()
     this_fixes=np.where(active_variables[vix].allowed_fids==1)
     this_fids=np.asarray(active_variables[vix].fids)
     this_fids=this_fids[this_fixes[0]]
-    this_cids=np.asarray(active_variables[vix].cids[d])
-    this_cids=this_cids[this_fixes[0]]
-    # show the coords and files in ascending order by coord min_val
-    min_vals=np.asarray([coords[cix].get_min_max_delta()[0] for cix in this_cids])
-    ix=np.argsort(min_vals)
-    this_cids=this_cids[ix]
-    this_fids=this_fids[ix]
+    if len(this_fids)>0:
+        # get which dimension has multiple files
+        d=active_variables[vix].get_multi_file_dimension()
+        if d>=0:
+            this_cids=np.asarray(active_variables[vix].cids[d])
+            this_cids=this_cids[this_fixes[0]]
+            # show the coords and files in ascending order by coord min_val
+            min_vals=np.asarray([coords[cix].get_min_max_delta()[0] for cix in this_cids])
+            ix=np.argsort(min_vals)
+            this_fids=this_fids[ix]
+        else:
+            print('cannot find multi dimension to order fids')
+            pdb.set_trace()
 
     for f in range(len(this_fids)):
         fid=this_fids[f]
         this_file=files_metadata.get_matching_fid(fid)
-        pathname=this_file.get_filepath()
+        pathname=get_filepath(all_dirpaths[this_file.did], this_file.filename)
         text_str=pathname+'\n'
         this_max_line_len=len(pathname)
         nlines=nlines+1
@@ -284,15 +305,23 @@ def popupFilesDetails(event,file_tag,vix):
 def search_db():
     results['state']='normal'
     results.delete("1.0",END)        
-    print('searching',dirname_lab["text"],variable_lab["text"])
+    print('searching',dirname_lab["text"]+'/*'+filename_entry.get(),'variable=',variable_lab["text"])
 
     dirname=dirname_lab["text"]
+    filename_exp=filename_entry.get()
 
     if dirname=='*':
-        fids=[] # all fids
+        files_metadata.read_from_database(cur,-1,filename_exp)
+        fids=[]  # allow all
+        nfiles=files_metdata.get_nfiles()
     else:
-        fids=files_metadata.get_fids_for_matching_dirnames(dirname)
-        print('fids=',fids)
+        dix=np.where(np.asarray(all_dirpaths)==dirname)
+        # get files with matching did
+        did=int(dix[0][0])
+        files_metadata.read_from_database(cur, did, filename_exp)
+        fids=files_metadata.get_fids()
+        nfiles=len(fids)
+        print(nfiles, 'fids')
 
     # set up the coord_filters min max values from the widgets
     for i in range(nfilters):
@@ -300,8 +329,10 @@ def search_db():
             
     variable=variable_lab["text"]
     # if we have not changed the variable since last search active_Variables will still have the variables in it
-    nvars=len(active_variables) 
-    if nvars==0:
+    nvars=0
+    if nfiles>0:
+        nvars=len(active_variables) 
+    if nvars==0 and nfiles>0:
         if variable=='*':
             # we are looking for all variables
             var_rows=select_all_variables(cur)
@@ -311,8 +342,6 @@ def search_db():
             
         for row in var_rows:
             this_var=Variable_metadata(row, cur)
-            #if verbose:
-            #    this_var.print()
             active_variables.append(this_var)
             nvars=nvars+1
 
@@ -322,7 +351,7 @@ def search_db():
         # check if all coordinates and fids of this variable are in requested range
         coords_in_range, nactive_files=this_var.check_fids_and_filters(fids, coord_filters, coords)
 
-        if coords_in_range:
+        if coords_in_range and nactive_files>0:
             var_tag='var_attr{t:d}'.format(t=vix)
             results.insert(INSERT, this_var.name+' (',(var_tag))
             results.tag_bind(var_tag, '<Button-1>', lambda e,vix=vix:popupVarDetails(e,var_tag,vix))
@@ -337,7 +366,7 @@ def search_db():
                 else:
                     # more than one coord covers the range
                     results.insert(INSERT, dimname+',',(coord_tag))
-                    results.tag_bind(coord_tag, '<Button-1>', lambda e,vix=vix:popupMultiCoordDetails(e,coord_tag,vix))
+                    results.tag_bind(coord_tag, '<Button-1>', lambda e,vix=vix,d=d:popupMultiCoordDetails(e,coord_tag,vix,d))
             files_tag='files_details{t:d}'.format(t=vix)
             results.insert(INSERT, ') for {n:d} files\n'.format(n=nactive_files),files_tag)
             results.tag_bind(files_tag, '<Button-1>', lambda e,vix=vix:popupFilesDetails(e,files_tag,vix))
@@ -373,17 +402,14 @@ con = sqlite3.connect(dbname)
 cur = con.cursor()
 
 #-----------------------------------------------------------------------------------
-# get a list of all files metadata from database and find the unique directory names
+# get a list of all directory names from database
 #-----------------------------------------------------------------------------------
-files_metadata=Files_metadata(cur)
-if verbose:
-    print(files_metadata.get_nfiles(), 'files')
-unique_dirnames=['*']
-dirnames=files_metadata.get_unique_dirnames()
-if len(dirnames)>1:
-    unique_dirnames=unique_dirnames+dirnames
+all_dirpaths=read_all_directories(cur)
+if len(all_dirpaths)==1:
+    unique_dirnames=all_dirpaths
 else:
-    unique_dirnames.append(dirnames[0])
+    unique_dirnames=['*']
+    unique_dirnames=unique_dirnames+all_dirpaths
 
 #-----------------------------------------------------------------------------------
 # get list of all unique variable names from database - we only need name at this stage
@@ -398,7 +424,7 @@ for v in np.unique(all_varnames):
     unique_varnames.append(v)
 
 #-----------------------------------------------------------------------------------
-# read all the coords but have a place to store variables that have been searched for
+# read all the coords but have a place to store variables and files that have been searched for
 #-----------------------------------------------------------------------------------
 coords=[]
 
@@ -408,7 +434,10 @@ for row in select_all_coords(cur):
     #    coords[-1].print()
 ncoords=len(coords)
 if verbose:
-    print(ncoords, 'Coords')          
+    print(ncoords, 'Coords') 
+
+# place to store the files- initially no files but read on a search        
+files_metadata=Files_metadata()
 # hold the variables that were searched for here - initially empty
 active_variables=[]
 
@@ -459,12 +488,21 @@ variable_mb.grid(row=1,column=0, sticky='W', pady=2)
 variable_lab = Label(master=setup_frame, text=unique_varnames[0],width=70,borderwidth=1,anchor='w', relief="solid", font=font)
 variable_lab.grid(row=1, column=1, sticky='W', pady=2, columnspan=5)
 
+# selecting filename - free form so handles regular expressions
+vcmd_filename = (setup_frame.register(set_filename), '%d')
+filename_lab = Label(master=setup_frame, text='Filename:', anchor='w', font=font)
+filename_lab.grid(row=2, column=0, sticky='W', pady=2)
+filename_entry = Entry(master=setup_frame, width=10, font=font, validate="key", validatecommand=vcmd_filename)
+filename_entry.grid(row=2, column=1, sticky='W', pady=2)
+#filename_entry.insert(0,'*')
+
+
 # set up widgets to handle bespoke filtering on coordinate values
 vcmd_number = (setup_frame.register(on_validate),
                 '%d', '%P', '%s', '%S')
 vcmd_time = (setup_frame.register(on_validate_time),
                 '%d', '%P', '%s', '%S')
-row=3
+row=4
 coord_names=np.asarray([coord.name for coord in coords])
 for i in range(nfilters):
     width=5

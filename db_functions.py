@@ -15,8 +15,10 @@ import numpy as np
 import datetime as dt
 import os
 
+
 FILE_SPECIFIC_VAL='File specific'  # used to set the value of an attribute that we don't really care about
                                    # and is different for different variables in different files
+UNKNOWN_ID=-1
 
 #--------------------------------------------------------------------------------------------
 # create all the tables we need to store metadata
@@ -24,7 +26,8 @@ FILE_SPECIFIC_VAL='File specific'  # used to set the value of an attribute that 
 def create_tables(cur,verbose=False):
     if verbose:
         print('Creating tables')
-    cur.execute("CREATE TABLE Files(fid INTEGER PRIMARY KEY, dirname TEXT, filename TEXT, symlink TEXT, created REAL, modified REAL)")
+    cur.execute("CREATE TABLE Directories(did INTEGER PRIMARY KEY, dirpath TEXT)")
+    cur.execute("CREATE TABLE Files(fid INTEGER PRIMARY KEY, did INTEGER, filename TEXT, symlink TEXT, created REAL, modified REAL)")
     cur.execute("CREATE TABLE Global_Attributes(fid INTEGER, name TEXT, value)")
     cur.execute("CREATE TABLE Coords(cid INTEGER PRIMARY KEY, name TEXT, nvals INTEGER, min_val REAL, max_val REAL, delta REAL)")
     cur.execute("CREATE TABLE Discrete_Coord_Values(cid INTEGER, value REAL)")
@@ -34,15 +37,52 @@ def create_tables(cur,verbose=False):
     cur.execute("CREATE TABLE Var_Attributes(vid INTEGER, name TEXT, value)")
 
 #-----------------------------------------------------------------
-# function to combine a directory and filename to give a filepath
+# function to combine a directory path and filename to give a filepath
 #----------------------------------------------------------------
-def get_filepath(dirname, filename):
-    return dirname+'/'+filename
+def get_filepath(dirpath, filename):
+    return dirpath+'/'+filename
 
 
 #--------------------------------------------------------------------------------------------
 # define classes to hold data read from database and the code to read them from the database
 #--------------------------------------------------------------------------------------------
+
+#------------------------------------------
+# class to hold data for one directory
+#------------------------------------------
+class Directory:
+    def __init__(self,*args):
+        # if one arg this is row for initiation from database otherwise did and dirname are
+        # given when creating database 
+        if len(args) == 1: 
+            self.init_from_database(*args)
+        else:
+            self.init_from_data(*args)
+
+    #---------------------------------------------------------------------------------------
+    # initiation from database where row is value returned from a fetchall() after a
+    # SELECT statement for all values from the Directories table
+    #---------------------------------------------------------------------------------------
+    def init_from_database(self, row):
+        self.did=row[0]
+        self.dirpath=row[1]
+
+    #---------------------------------------------------------------------------------------
+    # initiation when creating database.
+    #---------------------------------------------------------------------------------------
+    def init_from_data(self,did,dirpath):
+        self.did=did
+        self.dirpath=dirpath
+
+    #---------------------------------------------------------------------------------------
+    # inserts directory data into Directories table
+    #---------------------------------------------------------------------------------------
+    def insert_into_database(self, cur,verbose=False):
+        # create an entry in Directories table for this directory
+        if verbose:
+            print('Creating Directory entry', self.did, self.dirpath)
+        cur.execute("""INSERT INTO Directories (did, dirpath) VALUES(?,?)""",(self.did, self.dirpath))
+
 
 #---------------------------------------------------------------------------------------
 # Attributes are used for file attributes, coordinate attributes and variable attributes
@@ -88,7 +128,7 @@ class File_metadata:
     #---------------------------------------------------------------------------------------
     def init_from_database(self,row, cur):
         self.fid=row[0]
-        self.dirname=row[1]
+        self.did=row[1]
         self.filename=row[2]
         self.symlink=row[3]
         self.created=row[4]
@@ -99,33 +139,27 @@ class File_metadata:
     # initiation when creating database. This sets up all but the global attributes
     # global attributes can be added by calling add_attribute()
     #---------------------------------------------------------------------------------------
-    def init_from_data(self, fid, dirname, filename):
+    def init_from_data(self, fid, did, dirpath, filename):
         self.fid=fid
-        self.dirname=dirname
+        self.did=did
         self.filename=filename
         self.symlink=''
         # check whether this file is a symbolink link and what its creation and modification dates are
-        my_filepath=self.get_filepath()
+        my_filepath=get_filepath(dirpath, filename)
         if os.path.islink(my_filepath):
             self.symlink=os.readlink(my_filepath)
-            print(my_filepath, 'symlink', self.symlink)
         self.created=os.path.getctime(my_filepath)
         self.modified=os.path.getmtime(my_filepath)
         self.global_attributes=[]
 
     #---------------------------------------------------------------------------------------
     # called after init_from_data to add attributes
-    # name should vbe a str
+    # name should be a str
     # value can be a str or int or float
     #---------------------------------------------------------------------------------------
     def add_attribute(self, name, value):
         self.global_attributes.append(Attribute(name,value))
 
-    #---------------------------------------------------------------------------------------
-    # combine my dirname and filename
-    #---------------------------------------------------------------------------------------
-    def get_filepath(self):
-        return get_filepath(self.dirname, self.filename)
 
     #---------------------------------------------------------------------------------------
     # inserts file data into Files table and any global attributes into Global_Attributes table
@@ -133,9 +167,9 @@ class File_metadata:
     def insert_into_database(self, cur,verbose=False):
         # create an entry in Files table for this file
         if verbose:
-            print('Creating File entry', self.fid, self.get_filepath())
-        cur.execute("""INSERT INTO Files (fid, dirname, filename, symlink, created, modified) VALUES(?,?,?,?,?,?)""",
-                   (self.fid, self.dirname, self.filename, self.symlink, self.created, self.modified))
+            print('Creating File entry', self.fid, self.filename)
+        cur.execute("""INSERT INTO Files (fid, did, filename, symlink, created, modified) VALUES(?,?,?,?,?,?)""",
+                   (self.fid, self.did, self.filename, self.symlink, self.created, self.modified))
         for att in self.global_attributes:
             cur.execute("""INSERT INTO Global_Attributes(fid, name, value) VALUES (?,?,?)""",
                         (self.fid, att.name, att.value))
@@ -145,15 +179,17 @@ class File_metadata:
     # combine the file information into a string separated into different lines for different bits of
     # information
     # this does not include the global attributes
+    # inputs:
+    #   the dirpath that this file is in
     # returns:
     #   the combined string
     #   nlines - number of lines in the string
     #   max_line_len - the number of characters in the longest line
     #--------------------------------------------------------------------------------------------------
-    def get_file_info_str(self):
+    def get_file_info_str(self,dirpath):
         created_date = dt.datetime(1970,1,1)+dt.timedelta(seconds=self.created)
         modified_date = dt.datetime(1970,1,1)+dt.timedelta(seconds=self.modified)
-        file_text=self.get_filepath()+'\n'
+        file_text=get_filepath(dirpath, self.filename)+'\n'
         sym_text='symlink='+self.symlink+'\n'
         create_text='created='+created_date.strftime('%Y-%m-%d %H:%M')+'\n'
         mod_text='modified='+modified_date.strftime('%Y-%m-%d %H:%M')
@@ -165,7 +201,7 @@ class File_metadata:
     # function to print info about this file including the attributes
     #---------------------------------------------------------------------------------------
     def print(self):
-        print(self.fid, self.get_filepath(), self.symlink, self.created, self.modified)
+        print(self.fid, self.did, self.filename, self.symlink, self.created, self.modified)
         for att in self.global_attributes:
             print('\t', att.name, att.value)
 
@@ -175,14 +211,32 @@ class File_metadata:
 class Files_metadata:
 
     #---------------------------------------------------------------------------------------
-    # initiation from database where cur is a cursor for the database
+    # initiation 
     #---------------------------------------------------------------------------------------
-    def __init__(self,cur):
+    def __init__(self):
         self.all_files_metadata=[]
+
+    #---------------------------------------------------------------------------------------
+    # read files from database where cur is a cursor for the database and did is the directory id
+    # if did=-1 then we get all files otherwise select those with matching did
+    # if filename_exp=='' get all files, otherwise select those that match
+    #---------------------------------------------------------------------------------------
+    def read_from_database(self,cur,did=-1, filename_exp=''):
+        if self.get_nfiles()>0:
+            self.clear()
         # select all data from Files table
-        cur.execute("""SELECT fid, dirname, filename, symlink, created, modified FROM Files""")
+        if did==-1:
+            cur.execute("""SELECT fid, did, filename, symlink, created, modified FROM Files""")
+        else:
+            cur.execute("""SELECT fid, did, filename, symlink, created, modified FROM Files WHERE did=?""", (did,))
         for row in cur.fetchall():
-            self.all_files_metadata.append(File_metadata(row, cur))
+            this_file=File_metadata(row, cur)
+            if filename_exp!='':
+                match=this_file.filename.find(filename_exp)
+            else:
+                match=0
+            if match>=0:
+                self.all_files_metadata.append(this_file)
             
     #---------------------------------------------------------------------------------------
     # returns number of files stored
@@ -190,20 +244,27 @@ class Files_metadata:
     def get_nfiles(self):
         return len(self.all_files_metadata)
 
+
     #---------------------------------------------------------------------------------------
-    # gets the dirnames from each file and finds the unique ones
+    # clear the list of files
     #---------------------------------------------------------------------------------------
-    def get_unique_dirnames(self):
-        dirnames=np.asarray([this_file.dirname for this_file in self.all_files_metadata])
-        return np.unique(dirnames)
-            
+    def clear(self):
+        self.all_files_metadata.clear()
+
     #---------------------------------------------------------------------------------------
-    # returns a list of the fids of the files that have a dirname that equals the dirname requested
+    # returns a list of the fids of the files that have a directory id that equals the did requested
     #---------------------------------------------------------------------------------------
-    def get_fids_for_matching_dirnames(self,dirname):
-        matches=[this_file.dirname==dirname for this_file in self.all_files_metadata]
+    def get_fids_for_matching_did(self,did):
+        matches=[this_file.did==did for this_file in self.all_files_metadata]
         ix=np.where(matches)
         fids=[self.all_files_metadata[f].fid for f in ix[0]]
+        return fids
+
+    #---------------------------------------------------------------------------------------
+    # returns a list of the fids of all the files in this list
+    #---------------------------------------------------------------------------------------
+    def get_fids(self):
+        fids=[f.fid for f in self.all_files_metadata]
         return fids
     
     #---------------------------------------------------------------------------------------
@@ -316,7 +377,9 @@ class Coord_metadata:
 
         if self.nvals>1:
             deltas=abs(coord_values[1:]-coord_values[:-1])
-            if abs(deltas[0]-deltas[-1])<00.0001:
+            delta_deltas=deltas[1:]-deltas[:-1]
+            ix=np.where(abs(delta_deltas)>0.0001)
+            if len(ix[0])==0:
                 self.delta=float(np.mean(deltas))
             else:
                 self.values=[float(v) for v in coord_values]
@@ -349,12 +412,12 @@ class Coord_metadata:
     #---------------------------------------------------------------------------------------
     def matches_coord(self, other):
         matches=False
-        if self.name==other.name and self.nvals==other.nvals and abs(self.min_val-other.min_val)<1e-6 and  abs(self.max_val-other.max_val)<1e-6 and abs(self.delta-other.delta)<1e-6: 
+        if self.name==other.name and self.nvals==other.nvals and abs(self.min_val-other.min_val)<1e-6 and abs(self.max_val-other.max_val)<1e-6 and abs(self.delta-other.delta)<1e-6:
+            matches=True
             if len(self.values)>0:
-                if len(self.values)==len(other.values):
-                    matches=True
-            else:
-                matches=True
+                ix=np.where(abs(np.asarray(self.values)-np.asarray(other.values))>1e-6)
+                if len(ix[0])>0:
+                    matches=False
 
         # now check the attributes - they must both match
         if matches:
@@ -378,7 +441,7 @@ class Coord_metadata:
     def insert_into_database(self, cur,verbose=False):
         # create Coord entry
         if verbose:
-            print('creating Coord entry', self.cid, self.name, self.nvals, self.min_val, self.max_val, self.delta)
+            print('Creating Coord entry', self.cid, self.name, self.nvals, self.min_val, self.max_val, self.delta)
         cur.execute("""INSERT INTO Coords (cid, name, nvals, min_val, max_val, delta) VALUES (?,?,?,?,?,?)""",
                     (self.cid, self.name, self.nvals, self.min_val, self.max_val, self.delta))
         if len(self.values)>0:
@@ -607,35 +670,38 @@ class Variable_metadata:
     #-------------------------------------------------------------
     def matches_variable(self, other):
         matches=False
-        if self.name==other.name:
+        if self.name==other.name and self.ndims==other.ndims:
             matches=True 
             # now check the attributes:
-            # they must having matching names of attributes
-            # the follwing ones shoud also have matching values
-            attrnames_to_match=['units', 'long_name','standard_name']
+            # they must having matching names of attributes and all str attribute values should match
             nattr=len(self.attributes)
             nother_attr=len(other.attributes)
             if nattr!=nother_attr:
                 matches==False
             else:
+                file_specific_attribute_indices=[]
                 for i in range(nattr):
                     if self.attributes[i].name!=other.attributes[i].name:
                         matches=False
                         break
                     else:
-                        if self.attributes[i].name in attrnames_to_match:
-                            # values must match
-                            if self.attributes[i].value!=other.attributes[i].value:
-                                matches=False
-                                break
-                        else:
-                            # don't care if values match but mark as files specific if they dont
-                            if self.attributes[i].value!=other.attributes[i].value:
-                                self.attributes[i].value=FILE_SPECIFIC_VAL
+                        is_str=isinstance(self.attributes[i].value, str) and isinstance(other.attributes[i].value, str)
+                        if self.attributes[i].name!='scale_factor' and self.attributes[i].name!='add_offset':
+                            # scale_factor and add_offset can be different and I've even found that sometimes
+                            # they are string and sometimes float!
+                            # other string attributes are descriptive and should match value
+                            if is_str:
+                                # values must match
+                                if self.attributes[i].value!=other.attributes[i].value:
+                                    #print(self.name, self.attributes[i].name, 'does not match', self.attributes[i].value, other.attributes[i].value)
+                                    matches=False
+                                    break
+                        # if they don't match then mark as file specific but don't change self until all other attributes checked
+                        if self.attributes[i].value!=other.attributes[i].value:
+                            file_specific_attribute_indices.append(i)
+
         # now we need to check the coordinates - to be the same variable, only one coordinate can be different, eg time
-        if self.ndims!=other.ndims:
-             matches=False
-        else:
+        if matches:
            # check each dimension
            ncids_per_dim=np.zeros(self.ndims,int)
            other_matches=np.zeros(self.ndims,int)
@@ -650,6 +716,10 @@ class Variable_metadata:
            # we should have at least all dimensions-1 matching and the non matching dim should be the same for all fids
            if nmatches<self.ndims-1:
                matches=False
+
+        if matches:
+            for i in file_specific_attribute_indices:
+                self.attributes[i].value=FILE_SPECIFIC_VAL
            
         return matches
 
@@ -668,14 +738,14 @@ class Variable_metadata:
                 fid=-1
                 cid=self.cids[d][0] # this must be type <int> not <int64> to work in the database
                 if verbose:
-                    print(self.vid, 'creating vid cid fid for dim', self.vid, cid, fid, d)
+                    print('Creating vid cid fid for dim', self.vid, cid, fid, d)
                 cur.execute("""INSERT INTO Coords_Fids_Of_Variables (vid, cid, fid) VALUES (?,?,?)""", (self.vid, cid, fid))
             else:
                 for f in range(self.get_nfiles()):
                     cid=self.cids[d][f]
                     fid=self.fids[f]
                     if verbose:
-                        print(self.vid, 'creating vid cid fid for dim', self.vid, cid, fid, d)
+                        print('Creating vid cid fid for dim', self.vid, cid, fid, d)
                     cur.execute("""INSERT INTO Coords_Fids_Of_Variables (vid, cid, fid) VALUES (?,?,?)""", (self.vid, cid, fid))
         for att in self.attributes:
             cur.execute("""INSERT INTO Var_Attributes (vid, name, value) VALUES (?,?,?)""", (self.vid, att.name, att.value))
@@ -689,7 +759,6 @@ class Variable_metadata:
         dix=np.where(ncids>1)
         if len(dix[0])==0:
             print('cannot find dimension with more than 1 cid')
-            pdb.set_trace()
         else:
             d=dix[0][0]
 
@@ -794,9 +863,27 @@ class Variable_metadata:
     def print(self):
         print(self.vid, self.name,  'fids=',self.fids, 'cids=', self.cids)
         for attr in self.attributes:
-            print('\t'+attr.name, attr.value)
+            is_float=isinstance(attr.value, float)    
+            print('\t'+attr.name, attr.value, 'is float=',is_float)
 
 
+
+#----------------------------------------------------------------------------------------------------------
+# read all the directories table entries and return dirpaths as a list, the index into which is the did
+#---------------------------------------------------------------------------------------------------------
+def read_all_directories(cur):
+    ndirs=0
+    dirpaths=[]
+    res=cur.execute("""SELECT did,dirpath FROM Directories""")
+    for row in res.fetchall():
+        this_dir=Directory(row)
+        if this_dir.did!=ndirs:
+            print('unexpected directory id')
+            pdb.set_trace()
+        dirpaths.append(this_dir.dirpath)
+        ndirs=ndirs+1
+
+    return dirpaths
 
 #-----------------------------------------------------------
 # functions to select certain rows of variables and coords
