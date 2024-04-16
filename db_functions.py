@@ -452,7 +452,7 @@ class Coord_metadata:
                 cur.execute("""INSERT INTO Coord_Attributes (cid, name, value) VALUES (?,?,?)""", (self.cid, att.name, att.value))
                 
     #----------------------------------------------------------------------------------------
-    # this function returns the min_val, max_val and delta values of this coordinate converted
+    # this function returns the min_val, max_val and delta value of this coordinate converted
     # to datetime objects and the delta to a number of hours if this is a time coord.
     #----------------------------------------------------------------------------------------
     def get_min_max_delta(self):
@@ -470,9 +470,18 @@ class Coord_metadata:
             min_val=num2date(self.min_val,units=units,calendar=calendar)
             max_val=num2date(self.max_val,units=units,calendar=calendar)
             if self.nvals>1:
-                next_date=num2date(self.min_val+self.delta,units=units,calendar=calendar)
-                delta_dates=next_date-min_val
-                delta=delta_dates.days*24+delta_dates.seconds/3600 # delta in hours
+                if self.delta==0:
+                    # we had unevenly spaced dates but calculate mean spacing
+                    delta_dates=max_val-min_val
+                    delta=delta_dates.days*24+delta_dates.seconds/3600 # delta in hours
+                    # average delta is this divided by nvals
+                    delta=delta/self.nvals
+                   
+                else:
+                    next_date=num2date(self.min_val+self.delta,units=units,calendar=calendar)
+                    delta_dates=next_date-min_val
+                    delta=delta_dates.days*24+delta_dates.seconds/3600 # delta in hours
+
         return min_val, max_val, delta
     
 
@@ -493,9 +502,31 @@ class Coord_metadata:
         if self.is_time():
             min_date, max_date,delta_hours=self.get_min_max_delta()
             min_str=min_date.strftime('%Y/%m/%d %H:%M')
-            max_str=max_date.strftime('%Y/%m/%d %H:%M')
-            this_str=min_str+' to '+max_str+' every {h:.2f}'.format(h=delta_hours)+' hours'
-            max_line_len=len(this_str)
+            if self.nvals==1:
+                this_str=min_str
+                max_line_len=len(this_str)
+            else:
+
+                max_str=max_date.strftime('%Y/%m/%d %H:%M')
+                # check delta time is in sensible units - currently in hours
+                delta_units='hours'
+                delta_time=delta_hours
+                if delta_hours>24:
+                    delta_days=delta_hours/24
+                    delta_units='days'
+                    delta_time=delta_days
+                    if delta_days>=30:
+                        delta_months=delta_days/30
+                        delta_units='months'
+                        delta_time=delta_months
+                # if we have monthly data the times will not be evenly spaced but we cannot print all of them
+                # we can give range and state every 1 months
+                # if this is not likely to be monthly data we can just print the range
+                if self.delta==0 and delta_hours<(24*30):
+                    this_str=min_str+' to '+max_str+' ({n} times)'.format(n=self.nvals)
+                else:
+                    this_str=min_str+' to '+max_str+' every {h:.1f}'.format(h=delta_time)+' '+delta_units
+                max_line_len=len(this_str)
         else:
             units=''
             if self.units_attrix>=0:
@@ -522,7 +553,10 @@ class Coord_metadata:
                 nlines=nlines+1
                    
             else:
-                this_str='{minv:.2f} to {maxv:.2f} every {delt:.2f} '.format(minv=self.min_val, maxv=self.max_val,delt=self.delta)+units
+                if self.nvals==1:
+                    this_str='{minv:.2f} '.format(minv=self.min_val)+units
+                else:
+                    this_str='{minv:.2f} to {maxv:.2f} every {delt:.2f} '.format(minv=self.min_val, maxv=self.max_val,delt=self.delta)+units
                 max_line_len=len(this_str)
 
         return this_str, nlines, max_line_len
@@ -668,32 +702,37 @@ class Variable_metadata:
     # check whether this variable has same metadata as given variable
     # other is another instance of Variable
     #-------------------------------------------------------------
-    def matches_variable(self, other):
+    def matches_variable(self, other, verbose):
         matches=False
         if self.name==other.name and self.ndims==other.ndims:
             matches=True 
             # now check the attributes:
-            # they must having matching names of attributes and all str attribute values should match
+            # they must having matching names of attributes and all str attribute values should match but
+            # they don't have to be in the same order
             nattr=len(self.attributes)
             nother_attr=len(other.attributes)
+            other_attrnames=np.asarray([attr.name for attr in other.attributes])
             if nattr!=nother_attr:
                 matches==False
             else:
                 file_specific_attribute_indices=[]
                 for i in range(nattr):
-                    if self.attributes[i].name!=other.attributes[i].name:
+                    ix=np.where(other_attrnames==self.attributes[i].name)
+                    if len(ix[0])==0:
                         matches=False
                         break
                     else:
-                        is_str=isinstance(self.attributes[i].value, str) and isinstance(other.attributes[i].value, str)
+                        j=ix[0][0]
+                        is_str=isinstance(self.attributes[i].value, str) and isinstance(other.attributes[j].value, str)
                         if self.attributes[i].name!='scale_factor' and self.attributes[i].name!='add_offset':
                             # scale_factor and add_offset can be different and I've even found that sometimes
                             # they are string and sometimes float!
                             # other string attributes are descriptive and should match value
                             if is_str:
                                 # values must match
-                                if self.attributes[i].value!=other.attributes[i].value:
-                                    #print(self.name, self.attributes[i].name, 'does not match', self.attributes[i].value, other.attributes[i].value)
+                                if self.attributes[i].value!=other.attributes[j].value:
+                                    if verbose:
+                                        print(self.name, self.attributes[i].name, 'does not match', self.attributes[j].value, other.attributes[i].value)
                                     matches=False
                                     break
                         # if they don't match then mark as file specific but don't change self until all other attributes checked
@@ -715,6 +754,8 @@ class Variable_metadata:
            nmatches=np.sum(other_matches)
            # we should have at least all dimensions-1 matching and the non matching dim should be the same for all fids
            if nmatches<self.ndims-1:
+               if verbose:
+                   print(self.name, 'does not match dimensions',other_matches)
                matches=False
 
         if matches:

@@ -41,10 +41,10 @@ from db_functions import *
 #-----------------------------------------------------------------------------------------------------------------
 def create_or_find_matching_coord(this_coord, coords, cur, con, verbose):
 
-    existing_coord_names=np.asarray([coord.name for coord in coords])
+    existing_coord_name_matches=np.asarray([coord.name==this_coord.name for coord in coords])
     # do we already have this coordinate
     matches=False
-    ix=np.where(existing_coord_names==this_coord.name)
+    ix=np.where(existing_coord_name_matches)
     for i in ix[0]:
         matches=coords[i].matches_coord(this_coord)
         if matches:
@@ -77,12 +77,12 @@ def create_or_find_matching_coord(this_coord, coords, cur, con, verbose):
 #-----------------------------------------------------------------------------------------------------------------
 def create_or_find_matching_variable(this_var, variables, verbose):
 
-    existing_var_names=np.asarray([var.name for var in variables])
+    existing_var_name_matches=np.asarray([var.name==this_var.name for var in variables])
     # do we already have this variable
     matches=False
-    ix=np.where(existing_var_names==this_var.name)
+    ix=np.where(existing_var_name_matches)
     for i in ix[0]:
-        matches=variables[i].matches_variable(this_var)
+        matches=variables[i].matches_variable(this_var,verbose)
         if matches:
             variables[i].copy_fid_cids_from_other(this_var)
             this_var=[]
@@ -97,7 +97,7 @@ def create_or_find_matching_variable(this_var, variables, verbose):
         this_var.vid=nvars
         variables.append(this_var)
         if verbose:
-            print('new variable', this_var.name, this_var.vid)
+            print('New variable', this_var.name, this_var.vid)
 
 
 #-----------------------------------------------------------------------------------

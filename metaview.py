@@ -251,7 +251,7 @@ def popupFilesDetails(event,file_tag,vix):
     this_fixes=np.where(active_variables[vix].allowed_fids==1)
     this_fids=np.asarray(active_variables[vix].fids)
     this_fids=this_fids[this_fixes[0]]
-    if len(this_fids)>0:
+    if len(this_fids)>1:
         # get which dimension has multiple files
         d=active_variables[vix].get_multi_file_dimension()
         if d>=0:
@@ -262,7 +262,7 @@ def popupFilesDetails(event,file_tag,vix):
             ix=np.argsort(min_vals)
             this_fids=this_fids[ix]
         else:
-            print('cannot find multi dimension to order fids')
+            print(active_variables[vix].name, active_variables[vix].cids,'cannot find multi dimension to order fids')
             pdb.set_trace()
 
     for f in range(len(this_fids)):
@@ -313,7 +313,7 @@ def search_db():
     if dirname=='*':
         files_metadata.read_from_database(cur,-1,filename_exp)
         fids=[]  # allow all
-        nfiles=files_metdata.get_nfiles()
+        nfiles=files_metadata.get_nfiles()
     else:
         dix=np.where(np.asarray(all_dirpaths)==dirname)
         # get files with matching did
@@ -417,11 +417,12 @@ else:
 unique_varnames=['*']
 res=cur.execute("""SELECT name FROM Variables""")
 all_varnames=np.asarray(res.fetchall())
-if verbose:
-    print(len(all_varnames), 'variables', len(np.unique(all_varnames)), 'unique')
 # just get the unique varnames
 for v in np.unique(all_varnames):
     unique_varnames.append(v)
+if verbose:
+    print(len(all_varnames), 'variables', len(np.unique(all_varnames)), 'unique')
+    print(unique_varnames)
 
 #-----------------------------------------------------------------------------------
 # read all the coords but have a place to store variables and files that have been searched for
