@@ -1,8 +1,13 @@
 
 '''
-    Code to display a GUI to explore the database created by build_metdata_db.py
+    Code to display a GUI to explore the database(s) created by build_metdata_db.py
 
-    Usage: python metaview.py <dbname> [coord1 coord2...] -v
+    Usage: python metaview.py <dbname or root directory in which to find dbs> [coord1 coord2...] -v
+
+    If the user gives a single database name (ends in .db) then we just open that database but if they
+    give a directory name we will search the directory for anything with a .db extension and create
+    a Database_reader which opens the database. We find the list of directories and unique variables
+    that are found in these databases.
 
 '''
 import sys
@@ -17,35 +22,163 @@ from db_functions import *
 # set default font for Labels and Text
 font=('Ariel', 11)
 
+# global variables
+databases=[]
+unique_dirnames=[]
+unique_varnames=[]
+verbose=False
+coord_filters=[]
+current_db=-1 # index to current database set by dirname which is initially all
+
+
+#--------------------------------------------
+# Class to handle a single database
+#--------------------------------------------
+class Database_reader:
+
+    def __init__(self,dbname,verbose):
+        # open the database
+        if verbose:
+            print('opening database', dbname)
+        try:
+
+            self.con = sqlite3.connect(dbname)
+        except OSError as err:
+            warnings.warn('Cannot read database {dbname}, error={err}'.format(dbname=dbname, err=err),UserWarning)
+
+        self.cur = self.con.cursor()
+        self.dbname=dbname
+
+        #-----------------------------------------------------------------------------------
+        # get a list of all directory names from database
+        #-----------------------------------------------------------------------------------
+        self.dirpaths=read_all_directories(self.cur)
+        if verbose:
+            print(self.dirpaths)
+
+        #-----------------------------------------------------------------------------------
+        # get list of all unique variable names from database - we only need name at this stage
+        #-----------------------------------------------------------------------------------
+        self.unique_varnames=[]
+        res=self.cur.execute("""SELECT name FROM Variables""")
+        all_varnames=np.asarray(res.fetchall())
+        # just get the unique varnames
+        for v in np.unique(all_varnames):
+            self.unique_varnames.append(v)
+
+        #-----------------------------------------------------------------------------------
+        # have a place to store coordinates, variables and files that have been searched for
+        #-----------------------------------------------------------------------------------
+        # place to store coords but only read when needed
+        self.coords=[]
+        # place to store the files- initially no files but read on a search        
+        self.files_metadata=Files_metadata()
+        # hold the variables that were searched for here - initially empty
+        self.active_variables=[]
+
+    def has_dirpath(self,dirpath):
+         matches=np.asarray([this_dir==dirpath for this_dir in self.dirpaths])
+         ix=np.where(matches)
+         return len(ix[0])
+
+    def get_did(self,dirpath):
+         matches=np.asarray([this_dir==dirpath for this_dir in self.dirpaths])
+         ix=np.where(matches)
+         if len(ix[0])!=1:
+             print('database does not have one matching directory', self.dbname)
+         return int(ix[0][0])
+
+    def get_coordinate_index(self, coord_name):
+        if len(self.coords)==0:
+            ncoords=self.read_coordinates()
+
+        coord_name_matches=np.asarray([coord.name==coord_name for coord in self.coords])
+        ix=np.where(coord_name_matches)
+        return ix[0]
+
+    def read_variables(self, variable='*'):
+        if variable=='*':
+            # we are looking for all variables
+            var_rows=select_all_variables(self.cur)
+        else:
+            # we are looking for a specific variable
+            var_rows=select_variables_by_name(variable,self.cur)
+            
+        for row in var_rows:
+            this_var=Variable_metadata(row, self.cur)
+            self.active_variables.append(this_var)
+        return len(self.active_variables)
+
+    def read_coordinates(self):
+        for row in select_all_coords(self.cur):
+            self.coords.append(Coord_metadata(row,self.cur))
+        return len(self.coords)
+
+    def read_files(self, did, filename_exp):
+         self.files_metadata.read_from_database(self.cur,did,filename_exp)
+         return self.files_metadata.get_nfiles()
+
+    def check_valid_variable(self, vix, fids, coord_filters):
+        this_var=self.active_variables[vix]        
+        # check if all coordinates and fids of this variable are in requested range
+        coords_in_range, nactive_files=this_var.check_fids_and_filters(fids, coord_filters, self.coords)
+        return coords_in_range, nactive_files
+
 #----------------------------------------------------
 # Directory button has been used to select directory
 #----------------------------------------------------
 def set_dirname(d):
+    global current_db
+    global unique_dirnames
+    global databases
     if dirname_lab["text"]!=unique_dirnames[d]:
         print('setting dirname to', unique_dirnames[d])
         dirname_lab["text"]=unique_dirnames[d]
         results['state']='normal'
         results.delete("1.0",END)
         results['state']='disabled'
-        if files_metadata.get_nfiles()>0:
-            files_metadata.clear()
+        # work out which database this dirname is in
+        if unique_dirnames[d]=='*':
+            current_db=-1
+        else:
+            matches=np.asarray([db.has_dirpath(unique_dirnames[d]) for db in databases])
+            ix=np.where(matches)
+            current_db=ix[0][0]
+            if verbose:
+                print('current database is', databases[current_db].dbname)
+            if len(databases[current_db].dirpaths)>1:
+                if databases[current_db].files_metadata.get_nfiles()>0:
+                    databases[current_db].files_metadata.clear()
 
 #----------------------------------------------------
-# Filename button has been used to select files
+# Filename has been set to filter files
 #----------------------------------------------------
 def set_filename(d):
+
+    global current_db
+    global databases
 
     results['state']='normal'
     results.delete("1.0",END)
     results['state']='disabled'
-    if files_metadata.get_nfiles()>0:
-        files_metadata.clear()
+
+    if current_db==-1:
+        for db in databases:
+            if db.files_metadata.get_nfiles()>0:
+                db.files_metadata.clear()
+    else:
+        if databases[current_db].files_metadata.get_nfiles()>0:
+            databases[current_db].files_metadata.clear()
     return True
 
 #----------------------------------------------------
 # Variable button has been used to select variable
 #----------------------------------------------------
 def set_variable(v):
+    global current_db
+    global unique_varnames
+    global databases
+
     if variable_lab["text"]!=unique_varnames[v]:
         print('setting variable to', unique_varnames[v])
         variable_lab["text"]=unique_varnames[v]
@@ -53,7 +186,11 @@ def set_variable(v):
         results.delete("1.0",END)
         results['state']='disabled'
         # variable has changed so clear active_variables
-        active_variables.clear()
+        if current_db==-1:
+            for db in databases:
+                db.active_variables.clear()
+        else:
+            databases[current_db].active_variables.clear()
 
 #-----------------------------------------------------
 # validation of coord_filter entries
@@ -133,12 +270,13 @@ def on_validate_time(d, P, s, S):
 #-----------------------------------------------------
 # Pop ups
 #-----------------------------------------------------
-#-----------------------------------------------------
-# show the attributes of a variable with index vix
-#-----------------------------------------------------
-def popupVarDetails(event,var_tag,vix):
+#------------------------------------------------------------------------------
+# show the attributes of a variable with index vix in database with index dbix 
+#------------------------------------------------------------------------------
+def popupVarDetails(event,var_tag,dbix,vix):
     # show the attributes of this variable
-    this_var=active_variables[vix]
+    global databases
+    this_var=databases[dbix].active_variables[vix]
     attr_text,max_line_len=this_var.get_attributes_str()
     info_window = Tk()
     info_window.title(this_var.name+': attributes')
@@ -150,12 +288,13 @@ def popupVarDetails(event,var_tag,vix):
 
     info_window.mainloop()
 
-#-----------------------------------------------------
-# show the coordinate details for coordinate with index cix
-#-----------------------------------------------------
-def popupCoordDetails(event,coord_tag,cix):
+#----------------------------------------------------------------------------------------
+# show the coordinate details for coordinate with index cix in database with index dbix 
+#----------------------------------------------------------------------------------------
+def popupCoordDetails(event,coord_tag,dbix,cix):
     # show the range of this coordinate
-    this_coord=coords[cix]
+    global databases
+    this_coord=databases[dbix].coords[cix]
     coord_str,nlines,max_line_len=this_coord.get_min_max_delta_str()
     info_window = Tk()
     info_window.title(this_coord.name)
@@ -165,43 +304,43 @@ def popupCoordDetails(event,coord_tag,cix):
 
     info_window.mainloop()
 
-#------------------------------------------------------------------------------------
-# Show the details of all the coordinates of the dimension of variable with index vix
+#-------------------------------------------------------------------------------------------------------------------
+# Show the details of all the coordinates of the dimension d of variable with index vix in database with index dbix
 # which has multiple cids and fids.
 # Also shows which file each coordinate is in
 # We need to show them in order because there is no guarantee the coordinates will have
 # been added to the database in order
-#------------------------------------------------------------------------------------
-def popupMultiCoordDetails(event,tag,vix,d):
+#-------------------------------------------------------------------------------------------------------------------
+def popupMultiCoordDetails(event,tag,dbix,vix,d):
+    global databases
     # show the ranges of the dimension of the variable that has multiple coordinates
     nlines=0
     lines=[]
     max_line_len=0
-    # get which dimension has multiple files
-    this_fixes=np.where(active_variables[vix].allowed_fids==1)
-    this_fids=active_variables[vix].fids[this_fixes[0]]
-    this_cids=np.asarray(active_variables[vix].cids[d])
+    this_fixes=np.where(databases[dbix].active_variables[vix].allowed_fids==1)
+    this_fids=databases[dbix].active_variables[vix].fids[this_fixes[0]]
+    this_cids=np.asarray(databases[dbix].active_variables[vix].cids[d])
     this_cids=this_cids[this_fixes[0]]
     if len(this_fids)>1:
         # show the coords and files in ascending order by coord min_val
-        min_vals=np.asarray([coords[cix].get_min_max_delta()[0] for cix in this_cids])
+        min_vals=np.asarray([databases[dbix].coords[cix].get_min_max_delta()[0] for cix in this_cids])
         ix=np.argsort(min_vals)
         this_cids=this_cids[ix]
         this_fids=this_fids[ix]
 
     for c in range(len(this_cids)):
         cix=this_cids[c]
-        coord_str, this_nlines,this_max_line_len=coords[cix].get_min_max_delta_str()
+        coord_str, this_nlines,this_max_line_len=databases[dbix].coords[cix].get_min_max_delta_str()
         fid=this_fids[c]
-        this_file=files_metadata.get_matching_fid(fid)
-        pathname=get_filepath(all_dirpaths[this_file.did],this_file.filename)
+        this_file=databases[dbix].files_metadata.get_matching_fid(fid)
+        pathname=get_filepath(databases[dbix].dirpaths[this_file.did],this_file.filename)
         text_str=coord_str+' in '+pathname+'\n'
         this_max_line_len=this_max_line_len+len(pathname)+1
         nlines=nlines+this_nlines
         lines.append(text_str)
         max_line_len=np.amax([max_line_len,this_max_line_len])
     info_window = Tk()
-    info_window.title(active_variables[vix].name+': '+coords[this_cids[0]].name)
+    info_window.title(databases[dbix].active_variables[vix].name+': '+databases[dbix].coords[this_cids[0]].name)
     info_window.geometry("+{0}+{1}".format(event.x_root+6, event.y_root+2))
 
     max_height=12
@@ -218,57 +357,59 @@ def popupMultiCoordDetails(event,tag,vix,d):
     info_window.mainloop()
 
 #------------------------------------------------------------------------------------
-# Show the details of a file with given fid
+# Show the details of a file with given fid in database with index dbix
 #------------------------------------------------------------------------------------
-def popupFileDetails(event,file_tag,fid):
+def popupFileDetails(event,file_tag,dbix,fid):
 
-    this_file=files_metadata.get_matching_fid(fid)
-    dirpath=all_dirpaths[this_file.did]
+    global databases
+    this_file=databases[dbix].files_metadata.get_matching_fid(fid)
+    dirpath=databases[dbix].dirpaths[this_file.did]
 
     file_str, nlines,max_line_len=this_file.get_file_info_str(dirpath)
-    info_window = Tk()
-    info_window.overrideredirect(1)
-    info_window.geometry("+{0}+{1}".format(event.x_root+6, event.y_root+2))
+    finfo_window = Tk()
+    finfo_window.overrideredirect(1)
+    finfo_window.geometry("+{0}+{1}".format(event.x_root+6, event.y_root+2))
 
-    label = Label(info_window, text=file_str, anchor="w",justify='left',borderwidth=1, relief="solid", font=font)
+    label = Label(finfo_window, text=file_str, anchor="w",justify='left',borderwidth=1, relief="solid", font=font)
     label.pack(fill=BOTH)
 
-    info_window.bind_all("<Button-1>", lambda e: info_window.destroy())  # Remove popup when user clicks in the window
-    info_window.mainloop()
+    finfo_window.bind_all("<Button-1>", lambda e: finfo_window.destroy())  # Remove popup when user clicks in the window
+    finfo_window.mainloop()
 
 #------------------------------------------------------------------------------------
-# Show a list of all the valid files for variable with index vix
+# Show a list of all the valid files for variable with index vix in database with index dbix
 # The variable will have allowed_fids stored.
 # We need to show them in order which we determine from the values of the coordinates
 # because there is no guarantee the files will have been added to the database in order
 #------------------------------------------------------------------------------------
-def popupFilesDetails(event,file_tag,vix):
+def popupFilesDetails(event,file_tag,dbix,vix):
+    global databases
     nlines=0
     lines=[]
     max_line_len=0
     # we need to get the coord min and max to be able to order the files even though we wont display anything
     # about the coord
-    this_fixes=np.where(active_variables[vix].allowed_fids==1)
-    this_fids=np.asarray(active_variables[vix].fids)
+    this_fixes=np.where(databases[dbix].active_variables[vix].allowed_fids==1)
+    this_fids=np.asarray(databases[dbix].active_variables[vix].fids)
     this_fids=this_fids[this_fixes[0]]
     if len(this_fids)>1:
         # get which dimension has multiple files
-        d=active_variables[vix].get_multi_file_dimension()
+        d=databases[dbix].active_variables[vix].get_multi_file_dimension()
         if d>=0:
-            this_cids=np.asarray(active_variables[vix].cids[d])
+            this_cids=np.asarray(databases[dbix].active_variables[vix].cids[d])
             this_cids=this_cids[this_fixes[0]]
             # show the coords and files in ascending order by coord min_val
-            min_vals=np.asarray([coords[cix].get_min_max_delta()[0] for cix in this_cids])
+            min_vals=np.asarray([databases[dbix].coords[cix].get_min_max_delta()[0] for cix in this_cids])
             ix=np.argsort(min_vals)
             this_fids=this_fids[ix]
         else:
-            print(active_variables[vix].name, active_variables[vix].cids,'cannot find multi dimension to order fids')
+            print(databases[dbix].active_variables[vix].name, databases[dbix].active_variables[vix].cids,'cannot find multi dimension to order fids')
             pdb.set_trace()
 
     for f in range(len(this_fids)):
         fid=this_fids[f]
-        this_file=files_metadata.get_matching_fid(fid)
-        pathname=get_filepath(all_dirpaths[this_file.did], this_file.filename)
+        this_file=databases[dbix].files_metadata.get_matching_fid(fid)
+        pathname=get_filepath(databases[dbix].dirpaths[this_file.did], this_file.filename)
         text_str=pathname+'\n'
         this_max_line_len=len(pathname)
         nlines=nlines+1
@@ -276,7 +417,7 @@ def popupFilesDetails(event,file_tag,vix):
         max_line_len=np.amax([max_line_len,this_max_line_len])
 
     info_window = Tk()
-    info_window.title(active_variables[vix].name+': valid files')
+    info_window.title(databases[dbix].active_variables[vix].name+': valid files')
     info_window.geometry("+{0}+{1}".format(event.x_root+6, event.y_root+2))
 
     max_height=12
@@ -285,7 +426,7 @@ def popupFilesDetails(event,file_tag,vix):
     for l in range(nlines):
         file_tag='file_tag{t:d}'.format(t=this_fids[l])
         text.insert(INSERT, lines[l],(file_tag))
-        text.tag_bind(file_tag, '<Button-1>', lambda e,fid=this_fids[l]:popupFileDetails(e,file_tag,fid))
+        text.tag_bind(file_tag, '<Button-1>', lambda e,dbix=dbix,fid=this_fids[l]:popupFileDetails(e,file_tag,dbix,fid))
 
 
     ys = Scrollbar(info_window, orient = 'vertical', command = text.yview)
@@ -296,6 +437,47 @@ def popupFilesDetails(event,file_tag,vix):
     info_window.mainloop()
 
 
+#-------------------------------------------------------------------------------
+# display the variable details and create popups to display more details
+# inputs:
+#    dbix - the index into databases
+#    fids - the valid fids ([] is all valid)
+#    vix - index into the active_variables of the database
+#    ftag, vtag and ctag are numbers used to form a unique tag for the popup
+# returns:
+#    ftag, vtag, ctag - updated
+#-------------------------------------------------------------------------------
+def show_valid_variable(dbix, fids, vix, ftag, vtag, ctag):
+
+    global databases
+    # check if all coordinates and fids of this variable are in requested range
+    coords_in_range, nactive_files=databases[dbix].check_valid_variable(vix, fids, coord_filters)
+
+    if coords_in_range and nactive_files>0:
+        this_var=databases[dbix].active_variables[vix]
+        var_tag='var_attr{t:d}'.format(t=vtag)
+        vtag=vtag+1
+        results.insert(INSERT, this_var.name+' (',(var_tag))
+        results.tag_bind(var_tag, '<Button-1>', lambda e,dbix=dbix,vix=vix:popupVarDetails(e,var_tag,dbix,vix))
+        for d in range(this_var.ndims):
+            dimname=databases[dbix].coords[this_var.cids[d][0]].name
+            coord_tag='coord_tag{t:d}'.format(t=ctag)
+            ctag=ctag+1
+            if len(this_var.cids[d])==1:
+                # can have a popup for coord details
+                results.insert(INSERT, dimname+',',(coord_tag))
+                results.tag_bind(coord_tag, '<Button-1>', lambda e,dbix=dbix,cix=this_var.cids[d][0]:popupCoordDetails(e,coord_tag,dbix,cix))
+            else:
+                # more than one coord covers the range
+                results.insert(INSERT, dimname+',',(coord_tag))
+                results.tag_bind(coord_tag, '<Button-1>', lambda e,dbix=dbix,vix=vix,d=d:popupMultiCoordDetails(e,coord_tag,dbix,vix,d))
+        files_tag='files_details{t:d}'.format(t=ftag)
+        ftag=ftag+1
+        results.insert(INSERT, ') for {n:d} files\n'.format(n=nactive_files),files_tag)
+        results.tag_bind(files_tag, '<Button-1>', lambda e,dbix=dbix,vix=vix:popupFilesDetails(e,files_tag,dbix,vix))
+
+    return ftag, vtag, ctag
+
 #--------------------------------------------------------------------------------
 # Search button pressed
 # read all the filters (dirname, variable and coord_filters)
@@ -303,74 +485,60 @@ def popupFilesDetails(event,file_tag,vix):
 # display the variable details and create popups to display more details
 #-------------------------------------------------------------------------------
 def search_db():
+    global databases
+    global current_db
+    global verbose
+
     results['state']='normal'
     results.delete("1.0",END)        
-    print('searching',dirname_lab["text"]+'/*'+filename_entry.get(),'variable=',variable_lab["text"])
+    if verbose:
+        print('searching',dirname_lab["text"]+'/*'+filename_entry.get(),'variable=',variable_lab["text"])
 
     dirname=dirname_lab["text"]
     filename_exp=filename_entry.get()
-
-    if dirname=='*':
-        files_metadata.read_from_database(cur,-1,filename_exp)
-        fids=[]  # allow all
-        nfiles=files_metadata.get_nfiles()
-    else:
-        dix=np.where(np.asarray(all_dirpaths)==dirname)
-        # get files with matching did
-        did=int(dix[0][0])
-        files_metadata.read_from_database(cur, did, filename_exp)
-        fids=files_metadata.get_fids()
-        nfiles=len(fids)
-        print(nfiles, 'fids')
-
+    variable=variable_lab["text"]
+    # if we have not changed the variable since last search db.active_variables will still have the variables in it
+    nvars=0
+    nfiles=0
     # set up the coord_filters min max values from the widgets
     for i in range(nfilters):
         coord_filters[i].get()
-            
-    variable=variable_lab["text"]
-    # if we have not changed the variable since last search active_Variables will still have the variables in it
-    nvars=0
-    if nfiles>0:
-        nvars=len(active_variables) 
-    if nvars==0 and nfiles>0:
-        if variable=='*':
-            # we are looking for all variables
-            var_rows=select_all_variables(cur)
-        else:
-            # we are looking for a specific variable
-            var_rows=select_variables_by_name(variable,cur)
-            
-        for row in var_rows:
-            this_var=Variable_metadata(row, cur)
-            active_variables.append(this_var)
-            nvars=nvars+1
 
+    ftag=0
+    vtag=0
     ctag=0
-    for vix in range(nvars):
-        this_var=active_variables[vix]        
-        # check if all coordinates and fids of this variable are in requested range
-        coords_in_range, nactive_files=this_var.check_fids_and_filters(fids, coord_filters, coords)
+    if dirname=='*':
+        fids=[]  # allow all
+        for dbix in range(len(databases)):
+            db=databases[dbix]
+            this_nfiles=db.read_files(-1, filename_exp)
+            nfiles=nfiles+this_nfiles
+            this_ncoords=len(db.coords)
+            if this_ncoords==0:
+                this_ncoords=db.read_coordinates()
+            this_nvars=len(db.active_variables)
+            if this_nvars==0:
+                this_nvars=db.read_variables(variable)
+            for vix in range(this_nvars):
+                ftag, vtag, ctag=show_valid_variable(dbix, fids, vix, ftag, vtag, ctag)
+            nvars=nvars+this_nvars
 
-        if coords_in_range and nactive_files>0:
-            var_tag='var_attr{t:d}'.format(t=vix)
-            results.insert(INSERT, this_var.name+' (',(var_tag))
-            results.tag_bind(var_tag, '<Button-1>', lambda e,vix=vix:popupVarDetails(e,var_tag,vix))
-            for d in range(this_var.ndims):
-                dimname=coords[this_var.cids[d][0]].name
-                coord_tag='coord_tag{t:d}'.format(t=ctag)
-                ctag=ctag+1
-                if len(this_var.cids[d])==1:
-                    # can have a popup for coord details
-                    results.insert(INSERT, dimname+',',(coord_tag))
-                    results.tag_bind(coord_tag, '<Button-1>', lambda e,cix=this_var.cids[d][0]:popupCoordDetails(e,coord_tag,cix))
-                else:
-                    # more than one coord covers the range
-                    results.insert(INSERT, dimname+',',(coord_tag))
-                    results.tag_bind(coord_tag, '<Button-1>', lambda e,vix=vix,d=d:popupMultiCoordDetails(e,coord_tag,vix,d))
-            files_tag='files_details{t:d}'.format(t=vix)
-            results.insert(INSERT, ') for {n:d} files\n'.format(n=nactive_files),files_tag)
-            results.tag_bind(files_tag, '<Button-1>', lambda e,vix=vix:popupFilesDetails(e,files_tag,vix))
+    else:
+        did=databases[current_db].get_did(dirname)
+        # get files with matching did
+        nfiles=databases[current_db].read_files(did, filename_exp)
+        fids=databases[current_db].files_metadata.get_fids()
+        this_ncoords=len(databases[current_db].coords)
+        if this_ncoords==0:
+            this_ncoords=databases[current_db].read_coordinates()
+        nvars=len(databases[current_db].active_variables)
+        if nvars==0:
+            nvars=databases[current_db].read_variables(variable)
+        for vix in range(nvars):
+            ftag, vtag, ctag=show_valid_variable(current_db, fids, vix, ftag, vtag, ctag)
 
+    if verbose:
+         print(nfiles, 'files', nvars, 'variables')
 
     results['state']='disabled'
 
@@ -381,9 +549,8 @@ if len(sys.argv)<2:
     print('usage: ', sys.argv[0], '<dbname>', '<[coord1 coord2...]> <-v>')
     exit()
 
-dbname=sys.argv[1]
-verbose=False
-coord_filters=[]
+
+dbname_or_dir=sys.argv[1]
 for i in range(2,len(sys.argv)):
     if sys.argv[i]=='-v':
         verbose=True
@@ -391,57 +558,27 @@ for i in range(2,len(sys.argv)):
         coord_filters.append(Coord_filter(sys.argv[i]))
 nfilters=len(coord_filters)
 
-# open the database
-if os.path.isfile(dbname)==False:
-    print('No such database', dbname)
-    exit()
-
-if verbose:
-    print('opening database', dbname)
-con = sqlite3.connect(dbname)
-cur = con.cursor()
-
-#-----------------------------------------------------------------------------------
-# get a list of all directory names from database
-#-----------------------------------------------------------------------------------
-all_dirpaths=read_all_directories(cur)
-if len(all_dirpaths)==1:
-    unique_dirnames=all_dirpaths
+# read the database(s)
+wsplit=dbname_or_dir.split('.')
+if wsplit[-1]=='db':
+    databases.append(Database_reader(dbname_or_dir,verbose))
+    unique_dirnames=unique_dirnames+databases[-1].dirpaths
+    unique_varnames=unique_varnames+databases[-1].unique_varnames
 else:
-    unique_dirnames=['*']
-    unique_dirnames=unique_dirnames+all_dirpaths
+    for dirpath, dirnames, filenames in os.walk(dbname_or_dir):
+        for filename in filenames:
+            wsplit=filename.split('.')
+            if wsplit[-1]=='db':
+                databases.append(Database_reader(dirpath+'/'+filename,verbose))
+                unique_dirnames=unique_dirnames+databases[-1].dirpaths
+                unique_varnames=unique_varnames+databases[-1].unique_varnames
 
-#-----------------------------------------------------------------------------------
-# get list of all unique variable names from database - we only need name at this stage
-#-----------------------------------------------------------------------------------
-unique_varnames=['*']
-res=cur.execute("""SELECT name FROM Variables""")
-all_varnames=np.asarray(res.fetchall())
-# just get the unique varnames
-for v in np.unique(all_varnames):
-    unique_varnames.append(v)
+if len(unique_dirnames)>1:
+    unique_dirnames=['*']+unique_dirnames
+unique_varnames=['*']+list(np.unique(np.asarray(unique_varnames)))
 if verbose:
-    print(len(all_varnames), 'variables', len(np.unique(all_varnames)), 'unique')
+    print(len(unique_varnames)-1, 'unique varnames')
     print(unique_varnames)
-
-#-----------------------------------------------------------------------------------
-# read all the coords but have a place to store variables and files that have been searched for
-#-----------------------------------------------------------------------------------
-coords=[]
-
-for row in select_all_coords(cur):
-    coords.append(Coord_metadata(row,cur))
-    #if verbose:
-    #    coords[-1].print()
-ncoords=len(coords)
-if verbose:
-    print(ncoords, 'Coords') 
-
-# place to store the files- initially no files but read on a search        
-files_metadata=Files_metadata()
-# hold the variables that were searched for here - initially empty
-active_variables=[]
-
 
 #-------------------------------------------------------------------------------------
 # create the root window and set up frames to display widgets:
@@ -449,7 +586,7 @@ active_variables=[]
 # results_frame will contain all the widgets to display the search results
 #-------------------------------------------------------------------------------------
 root = Tk()
-root.title('metaview: '+dbname)
+root.title('metaview: '+dbname_or_dir)
 root.resizable(False, False) # don't let user resize
 
 setup_frame = Frame(master=root,relief=RIDGE, borderwidth=5)
@@ -504,18 +641,20 @@ vcmd_number = (setup_frame.register(on_validate),
 vcmd_time = (setup_frame.register(on_validate_time),
                 '%d', '%P', '%s', '%S')
 row=4
-coord_names=np.asarray([coord.name for coord in coords])
 for i in range(nfilters):
     width=5
     txt_extra=''
     vcmd=vcmd_number
-    ix=np.where(coord_names==coord_filters[i].name)
-    if len(ix[0])>0:
-        if coords[ix[0][0]].is_time():
-            coord_filters[i].is_time=True
-            vcmd=vcmd_time
-            txt_extra=' (YYYY-MM-DD)'
-            width=10
+    for db in databases:
+
+        ix=db.get_coordinate_index(coord_filters[i].name)
+        if len(ix)>0:
+            if db.coords[ix[0]].is_time():
+                coord_filters[i].is_time=True   
+                vcmd=vcmd_time
+                txt_extra=' (YYYY-MM-DD)'
+                width=10
+                break
 
     coord_min_txt = Label(master=setup_frame, text='min '+coord_filters[i].name+txt_extra+':', anchor='w', font=font)
     coord_min_txt.grid(row=row, column=0, sticky='W', pady=2)

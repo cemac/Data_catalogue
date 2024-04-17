@@ -148,8 +148,12 @@ class File_metadata:
         my_filepath=get_filepath(dirpath, filename)
         if os.path.islink(my_filepath):
             self.symlink=os.readlink(my_filepath)
-        self.created=os.path.getctime(my_filepath)
-        self.modified=os.path.getmtime(my_filepath)
+            # get dates for actual file in symbolic link
+            self.created=os.path.getctime(self.symlink)
+            self.modified=os.path.getmtime(self.symlink)
+        else:
+            self.created=os.path.getctime(my_filepath)
+            self.modified=os.path.getmtime(my_filepath)
         self.global_attributes=[]
 
     #---------------------------------------------------------------------------------------
@@ -419,7 +423,7 @@ class Coord_metadata:
                 if len(ix[0])>0:
                     matches=False
 
-        # now check the attributes - they must both match
+        # now check the attributes - they must both match but don't need to be in the same order
         if matches:
             nattr=len(self.attributes)
             nother_attr=len(other.attributes)
@@ -427,9 +431,17 @@ class Coord_metadata:
                 matches==False
             else:
                 for i in range(nattr):
-                    if self.attributes[i].name!=other.attributes[i].name or self.attributes[i].value!=other.attributes[i].value:
+                    name_matches=np.asarray([attr.name==self.attrbutes[i].name for attr in other.attributes])
+                    ix=np.where(name_matches)
+                    if len(ix[0])==0:
                         matches=False
                         break
+                    else:
+                        # name matches but does value?
+                        j=ix[0][0]
+                        if self.attributes[i].value!=other.attributes[j].value:
+                            matches=False
+                            break
 
         return matches
 
@@ -732,11 +744,11 @@ class Variable_metadata:
                                 # values must match
                                 if self.attributes[i].value!=other.attributes[j].value:
                                     if verbose:
-                                        print(self.name, self.attributes[i].name, 'does not match', self.attributes[j].value, other.attributes[i].value)
+                                        print(self.name, self.attributes[i].name, 'does not match', self.attributes[i].value, other.attributes[j].value)
                                     matches=False
                                     break
                         # if they don't match then mark as file specific but don't change self until all other attributes checked
-                        if self.attributes[i].value!=other.attributes[i].value:
+                        if self.attributes[i].value!=other.attributes[j].value:
                             file_specific_attribute_indices.append(i)
 
         # now we need to check the coordinates - to be the same variable, only one coordinate can be different, eg time
@@ -820,8 +832,6 @@ class Variable_metadata:
     #----------------------------------------------------------------------------------------
     def check_fids_and_filters(self, fids, coord_filters, coords):
 
-        filter_names=np.asarray([coord_filter.name for coord_filter in coord_filters])
-
         if len(fids)==0:
             allowed_fids=np.ones(self.get_nfiles())
         else:
@@ -832,10 +842,12 @@ class Variable_metadata:
                     allowed_fids[fix[0][0]]=1
 
         coords_in_range=True 
-        if len(filter_names)>0:       
+        if len(coord_filters)>0:       
             for d in range(self.ndims):
                 cname=coords[self.cids[d][0]].name
-                filter_ix=np.where(filter_names==cname)
+                # allow filter_name to be part of the coord name eg longitude1 should match with longitude
+                matches=np.asarray([cname.find(coord_filter.name) for coord_filter in coord_filters])
+                filter_ix=np.where(matches>=0)
                 if len(filter_ix[0])>0:
                     if coord_filters[filter_ix[0][0]].min_val!=None or coord_filters[filter_ix[0][0]].max_val!=None:
                         # we need to check this dimension
