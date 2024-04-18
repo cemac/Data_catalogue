@@ -77,10 +77,10 @@ class Directory:
     #---------------------------------------------------------------------------------------
     # inserts directory data into Directories table
     #---------------------------------------------------------------------------------------
-    def insert_into_database(self, cur,verbose=False):
+    def insert_into_database(self, thread_name, cur,verbose=False):
         # create an entry in Directories table for this directory
         if verbose:
-            print('Creating Directory entry', self.did, self.dirpath)
+            print(thread_name, ': Creating Directory entry', self.did, self.dirpath)
         cur.execute("""INSERT INTO Directories (did, dirpath) VALUES(?,?)""",(self.did, self.dirpath))
 
 
@@ -168,10 +168,10 @@ class File_metadata:
     #---------------------------------------------------------------------------------------
     # inserts file data into Files table and any global attributes into Global_Attributes table
     #---------------------------------------------------------------------------------------
-    def insert_into_database(self, cur,verbose=False):
+    def insert_into_database(self, thread_name, cur,verbose=False):
         # create an entry in Files table for this file
         if verbose:
-            print('Creating File entry', self.fid, self.filename)
+            print(thread_name, ': Creating File entry', self.fid, self.filename)
         cur.execute("""INSERT INTO Files (fid, did, filename, symlink, created, modified) VALUES(?,?,?,?,?,?)""",
                    (self.fid, self.did, self.filename, self.symlink, self.created, self.modified))
         for att in self.global_attributes:
@@ -450,10 +450,10 @@ class Coord_metadata:
     # and any attributes into Coords_Attributes table
     # cur is the cursor for the database
     #----------------------------------------------------------------------------------------
-    def insert_into_database(self, cur,verbose=False):
+    def insert_into_database(self, thread_name, cur,verbose=False):
         # create Coord entry
         if verbose:
-            print('Creating Coord entry', self.cid, self.name, self.nvals, self.min_val, self.max_val, self.delta)
+            print(thread_name, ': Creating Coord entry', self.cid, self.name, self.nvals, self.min_val, self.max_val, self.delta)
         cur.execute("""INSERT INTO Coords (cid, name, nvals, min_val, max_val, delta) VALUES (?,?,?,?,?,?)""",
                     (self.cid, self.name, self.nvals, self.min_val, self.max_val, self.delta))
         if len(self.values)>0:
@@ -779,9 +779,9 @@ class Variable_metadata:
     #--------------------------------------------------
     # insert all the variable metadata into the database
     #--------------------------------------------------
-    def insert_into_database(self,cur,verbose=False):
+    def insert_into_database(self,thread_name,cur,verbose=False):
         if verbose:
-            print('Creating Variable entry', self.vid, self.name)
+            print(thread_name, ': Creating Variable entry', self.vid, self.name)
         cur.execute("""INSERT INTO Variables (vid, name, ndims) VALUES (?,?,?)""", (self.vid, self.name, self.ndims))
         for d in range(self.ndims):
             this_cids=np.unique(np.asarray(self.cids[d]))
@@ -791,14 +791,14 @@ class Variable_metadata:
                 fid=-1
                 cid=self.cids[d][0] # this must be type <int> not <int64> to work in the database
                 if verbose:
-                    print('Creating vid cid fid for dim', self.vid, cid, fid, d)
+                    print(thread_name, ': Creating vid cid fid for dim', self.vid, cid, fid, d)
                 cur.execute("""INSERT INTO Coords_Fids_Of_Variables (vid, cid, fid) VALUES (?,?,?)""", (self.vid, cid, fid))
             else:
                 for f in range(self.get_nfiles()):
                     cid=self.cids[d][f]
                     fid=self.fids[f]
                     if verbose:
-                        print('Creating vid cid fid for dim', self.vid, cid, fid, d)
+                        print(thread_name, ': Creating vid cid fid for dim', self.vid, cid, fid, d)
                     cur.execute("""INSERT INTO Coords_Fids_Of_Variables (vid, cid, fid) VALUES (?,?,?)""", (self.vid, cid, fid))
         for att in self.attributes:
             cur.execute("""INSERT INTO Var_Attributes (vid, name, value) VALUES (?,?,?)""", (self.vid, att.name, att.value))
