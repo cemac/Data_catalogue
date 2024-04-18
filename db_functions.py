@@ -431,7 +431,7 @@ class Coord_metadata:
                 matches==False
             else:
                 for i in range(nattr):
-                    name_matches=np.asarray([attr.name==self.attrbutes[i].name for attr in other.attributes])
+                    name_matches=np.asarray([attr.name==self.attributes[i].name for attr in other.attributes])
                     ix=np.where(name_matches)
                     if len(ix[0])==0:
                         matches=False
