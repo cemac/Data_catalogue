@@ -94,7 +94,11 @@ class Attribute:
         self.name=attrname
         # sqlite3 doesn't handle integers well - it creates blobs depending on size of integer so best
         # to save as float or string
-        if isinstance(value, str)==False:
+        if isinstance(value, np.ndarray):
+            # we cannot store an array as a database value so we will have to convert this to a single string
+            words=[str(v) for v in value]
+            value='['+', '.join(words)+']'
+        elif isinstance(value, str)==False:
             value=float(value)
         self.value=value
 
