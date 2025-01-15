@@ -14,7 +14,7 @@ from netCDF4 import num2date, date2num
 import numpy as np
 import datetime as dt
 import os
-
+import string
 
 FILE_SPECIFIC_VAL='File specific'  # used to set the value of an attribute that we don't really care about
                                    # and is different for different variables in different files
@@ -403,10 +403,21 @@ class Coord_metadata:
             self.calendar_attrix=len(self.attributes)-1
 
     #----------------------------------------------------------------------------------------
-    # this coordinate is a time coordinate if it has units and calendar attributes
+    # this coordinate is a time coordinate if it has units that start "days" or "hours"
+    # it may also have calendar attributes but if not, assume gregorian
     #----------------------------------------------------------------------------------------
     def is_time(self):
-        return self.units_attrix>=0 and self.calendar_attrix>=0
+        is_time=False
+        calendar=None
+        if self.units_attrix>=0:
+            units=self.attributes[self.units_attrix].value
+            if units.startswith('months') or units.startswith('days') or units.startswith('hours') or units.startswith('seconds') or self.calendar_attrix>=0:
+                is_time=True
+                if self.calendar_attrix>=0:
+                    calendar=self.attributes[self.calendar_attrix]
+                else:
+                    calendar='gregorian'
+        return is_time, calendar
 
     #----------------------------------------------------------------------------------------
     # check whether this coord has same metadata as given coord
@@ -453,7 +464,7 @@ class Coord_metadata:
     def insert_into_database(self, thread_name, cur,verbose=False):
         # create Coord entry
         if verbose:
-            print(thread_name, ': Creating Coord entry', self.cid, self.name, self.nvals, self.min_val, self.max_val, self.delta)
+            print(thread_name, ': Creating Coord entry', self.cid, self.name, 'nvals=',self.nvals, 'min=',self.min_val, 'max=',self.max_val, 'every', self.delta)
         cur.execute("""INSERT INTO Coords (cid, name, nvals, min_val, max_val, delta) VALUES (?,?,?,?,?,?)""",
                     (self.cid, self.name, self.nvals, self.min_val, self.max_val, self.delta))
         if len(self.values)>0:
@@ -461,6 +472,8 @@ class Coord_metadata:
                 cur.execute("""INSERT INTO Discrete_Coord_Values (cid, value) VALUES (?,?)""", (self.cid, self.values[i]) )
         if len(self.attributes)>0:
             for att in self.attributes:
+                if verbose:
+                    print(thread_name, ': creating coord attribute for cid',self.cid, att.name,att.value) 
                 cur.execute("""INSERT INTO Coord_Attributes (cid, name, value) VALUES (?,?,?)""", (self.cid, att.name, att.value))
                 
     #----------------------------------------------------------------------------------------
@@ -471,13 +484,9 @@ class Coord_metadata:
         min_val=self.min_val
         max_val=self.max_val
         delta=self.delta
-        if self.is_time():
-            calendar=self.attributes[self.calendar_attrix].value
+        is_time, calendar=self.is_time()
+        if is_time:
             units=self.attributes[self.units_attrix].value
-            units_split=units.split(' ')
-            if units_split[0]!='hours' and units_split[0]!='days':
-                print('unexpected units for time', units)
-                pdb.set_trace()
             # convert the values of this coordinate to dates to get min max and delta in hours
             min_val=num2date(self.min_val,units=units,calendar=calendar)
             max_val=num2date(self.max_val,units=units,calendar=calendar)
@@ -511,7 +520,8 @@ class Coord_metadata:
     def get_min_max_delta_str(self):
         nlines=1
         max_line_len=0
-        if self.is_time():
+        is_time, calendar= self.is_time()
+        if is_time:
             min_date, max_date,delta_hours=self.get_min_max_delta()
             min_str=min_date.strftime('%Y/%m/%d %H:%M')
             if self.nvals==1:
@@ -791,17 +801,19 @@ class Variable_metadata:
                 fid=-1
                 cid=self.cids[d][0] # this must be type <int> not <int64> to work in the database
                 if verbose:
-                    print(thread_name, ': Creating vid cid fid for dim', self.vid, cid, fid, d)
+                    print(thread_name, ': vid={} creating [{}] cid={} fid={}'.format(self.vid, d, cid, fid))
                 cur.execute("""INSERT INTO Coords_Fids_Of_Variables (vid, cid, fid) VALUES (?,?,?)""", (self.vid, cid, fid))
             else:
                 for f in range(self.get_nfiles()):
                     cid=self.cids[d][f]
                     fid=self.fids[f]
                     if verbose:
-                        print(thread_name, ': Creating vid cid fid for dim', self.vid, cid, fid, d)
+                        print(thread_name, ': vid={} creating [{}] cid={} fid={}'.format(self.vid, d, cid, fid))
                     cur.execute("""INSERT INTO Coords_Fids_Of_Variables (vid, cid, fid) VALUES (?,?,?)""", (self.vid, cid, fid))
         for att in self.attributes:
-            cur.execute("""INSERT INTO Var_Attributes (vid, name, value) VALUES (?,?,?)""", (self.vid, att.name, att.value))
+           if verbose:
+               print(thread_name, ': Creating attribute for variable', self.vid, att.name, att.value)
+           cur.execute("""INSERT INTO Var_Attributes (vid, name, value) VALUES (?,?,?)""", (self.vid, att.name, att.value))
 
     #----------------------------------------------------------------------------------------
     # get the dimension which has multiple files and therefore coordinates
