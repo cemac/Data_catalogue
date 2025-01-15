@@ -219,13 +219,19 @@ class Read_metadata_thread(threading.Thread):
         # get the coords from this file - remember the cids and dimnames to match with the variables
         this_cids=[]
         this_dimnames=[]
+        # a coordinate is a dimension of a variable but it is usually also stored in netcdf as a
+        # variable too because it has values and attributes
+        vkeys=data.variables.keys()
         for d in data.dimensions:
-            # read the information about this coordinate by creating a coordinate instance
-            this_coord=Coord_metadata(UNKNOWN_ID, d, data[d][:])
-            for attrname in data[d].ncattrs():
-                value=getattr(data[d], attrname)
-                this_coord.add_attribute(attrname,value)
-
+            if d in vkeys:
+                # read the information about this coordinate by creating a coordinate instance
+                this_coord=Coord_metadata(UNKNOWN_ID, d, data[d][:])
+                for attrname in data[d].ncattrs():
+                    value=getattr(data[d], attrname)
+                    this_coord.add_attribute(attrname,value)
+            else:
+                # there is no information for this coordinate but we must still create a coordinate
+                this_coord=Coord_metadata(UNKNOWN_ID, d, [])
             this_cid=Read_metadata_thread.create_or_find_matching_coord(this_coord, self.thread_name)
             this_cids.append(this_cid)
             this_dimnames.append(d)
@@ -235,10 +241,8 @@ class Read_metadata_thread(threading.Thread):
         # get the variable names that are not in dimensions
         for v in data.variables:
             is_dim=False
-            for d in data.dimensions:
-                if v==d:
-                    is_dim=True
-                    break
+            if v in data.dimensions:
+                is_dim=True
             if is_dim==False:
                 # this is a proper variable so create a variable instance
                 ndims=len(data[v].dimensions)
@@ -253,10 +257,11 @@ class Read_metadata_thread(threading.Thread):
                 for d in data[v].dimensions:
                     cdix=np.where(this_dimnames==d)
                     if len(cdix[0])==0:
-                        print('cannot find dimname', dimname)
+                        print('cannot find dimname', d)
                         pdb.set_trace()
-                    cid=this_cids[cdix[0][0]]
-                    this_var.add_cid(dix,cid)
+                    else:
+                        cid=this_cids[cdix[0][0]]
+                        this_var.add_cid(dix,cid)
                     dix=dix+1
                 Read_metadata_thread.create_or_find_matching_variable(this_var,self.thread_name)             
 

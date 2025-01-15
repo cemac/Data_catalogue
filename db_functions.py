@@ -365,7 +365,7 @@ class Coord_metadata:
                 self.values.append(val[0])
 
     #--------------------------------------------------
-    # initiate from reading datafile
+    # initiate from reading datafile (coord_values can be an empty list)
     #--------------------------------------------------
     def init_from_data(self,cid, name, coord_values):
         self.cid=cid
@@ -376,17 +376,21 @@ class Coord_metadata:
 
         # sqlite3 doesn't handle integers well - it creates blobs depending on size of integer so best
         # to save data as float
-        self.min_val=float(np.amin(coord_values))
-        self.max_val=float(np.amax(coord_values))
+        if self.nvals>0:
+            self.min_val=float(np.amin(coord_values))
+            self.max_val=float(np.amax(coord_values))
 
-        if self.nvals>1:
-            deltas=abs(coord_values[1:]-coord_values[:-1])
-            delta_deltas=deltas[1:]-deltas[:-1]
-            ix=np.where(abs(delta_deltas)>0.0001)
-            if len(ix[0])==0:
-                self.delta=float(np.mean(deltas))
-            else:
-                self.values=[float(v) for v in coord_values]
+            if self.nvals>1:
+                deltas=abs(coord_values[1:]-coord_values[:-1])
+                delta_deltas=deltas[1:]-deltas[:-1]
+                ix=np.where(abs(delta_deltas)>0.0001)
+                if len(ix[0])==0:
+                    self.delta=float(np.mean(deltas))
+                else:
+                    self.values=[float(v) for v in coord_values]
+        else:
+            self.min_val='NA'
+            self.max_val='NA'
 
         self.attributes=[] # attributes are added by calling add_attribute()
         self.units_attrix=-1
@@ -575,7 +579,9 @@ class Coord_metadata:
                 nlines=nlines+1
                    
             else:
-                if self.nvals==1:
+                if self.nvals==0:
+                    this_str='NA'
+                elif self.nvals==1:
                     this_str='{minv:.2f} '.format(minv=self.min_val)+units
                 else:
                     this_str='{minv:.2f} to {maxv:.2f} every {delt:.2f} '.format(minv=self.min_val, maxv=self.max_val,delt=self.delta)+units
