@@ -539,7 +539,7 @@ def show_valid_variable(dbix, fids, vix, ftag, vtag, ctag):
     # check if all coordinates and fids of this variable are in requested range
     coords_in_range, nactive_files=databases[dbix].check_valid_variable(vix, fids, coord_filters)
     if verbose:
-        print('show_valid_variable(): , databases[dbix].active_variables[vix].name', nactive_files,'active_files')
+        print('show_valid_variable(): ', databases[dbix].active_variables[vix].name, nactive_files,'active_files')
     if coords_in_range and nactive_files>0:
         this_var=databases[dbix].active_variables[vix]
         var_tag='var_attr{t:d}'.format(t=vtag)
