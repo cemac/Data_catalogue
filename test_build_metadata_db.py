@@ -1,6 +1,8 @@
 #--------------------------------------------------------------
 # used to test the reading of a single file to get the metadata
-# and storing it in a database
+# and storing it in a database so we don't take long to build a database
+# from a whole directory of files
+# This works in the same way as the real build_metadata_db.py.
 #---------------------------------------------------------------
 import sys
 import os
@@ -36,7 +38,7 @@ def main():
  
     # use filename with .nc removed and .db added
     wsplit=filename.split('.'+Read_metadata_thread.ftype)
-    dbname=wsplit[0]+'.db'          
+    dbname='./Databases/'+wsplit[0]+'.db'          
     Read_metadata_thread.con = sqlite3.connect(dbname,check_same_thread=False)
     Read_metadata_thread.cur = Read_metadata_thread.con.cursor()
     # check whether there are any tables

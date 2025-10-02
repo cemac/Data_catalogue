@@ -5,7 +5,7 @@
     from/to the database.
 
     These functions are called by both build_metadata_db.py and metaview.py
-    When building  the database we have no idea how many files, coordinates or variables there
+    When building the database we have no idea how many files, coordinates or variables there
     will be so we have to use append to build lists. This is not ideal when there could be 1000's 
     of files and coordinates. When reading from the database we can check how many rows so can 
     preallocate space.
@@ -84,7 +84,7 @@ class Directory:
     def insert_into_database(self, thread_name, cur,verbose=False):
         # create an entry in Directories table for this directory
         if verbose:
-            print(thread_name, ': Creating Directory entry', self.did, self.dirpath)
+            print(thread_name, ' Directory.insert_into_database(): Creating Directory entry', self.did, self.dirpath)
         cur.execute("""INSERT INTO Directories (did, dirpath) VALUES(?,?)""",(self.did, self.dirpath))
 
 
@@ -171,7 +171,7 @@ class File_metadata:
         my_filepath=get_filepath(dirpath, filename)
         if os.path.islink(my_filepath):
             self.symlink=os.readlink(my_filepath)
-            # get dates for actual file in symbolic link
+            # get dates as epoch time for actual file in symbolic link
             self.created=os.path.getctime(self.symlink)
             self.modified=os.path.getmtime(self.symlink)
         else:
@@ -194,7 +194,7 @@ class File_metadata:
     def insert_into_database(self, thread_name, cur,verbose=False):
         # create an entry in Files table for this file
         if verbose:
-            print(thread_name, ': Creating File entry', self.fid, self.filename)
+            print(thread_name, ' File_metadata.insert_into_database(): Creating File entry', self.fid, self.filename)
         cur.execute("""INSERT INTO Files (fid, did, filename, symlink, created, modified) VALUES(?,?,?,?,?,?)""",
                    (self.fid, self.did, self.filename, self.symlink, self.created, self.modified))
         for att in self.global_attributes:
@@ -234,8 +234,8 @@ class File_metadata:
     #   the combined string
     #--------------------------------------------------------------------------------------------------
     def get_file_info_str(self,dirpath):
-        created_date = dt.datetime(1970,1,1)+dt.timedelta(seconds=self.created)
-        modified_date = dt.datetime(1970,1,1)+dt.timedelta(seconds=self.modified)
+        created_date =  dt.datetime.fromtimestamp(self.created)
+        modified_date = dt.datetime.fromtimestamp(self.modified)
         file_text=get_filepath(dirpath, self.filename)
         sym_text=', symlink='+self.symlink
         create_text=', created='+created_date.strftime('%Y-%m-%d %H:%M')
@@ -340,8 +340,8 @@ class Coord_filter:
     def __init__(self,name):
         self.name=name
         self.is_time=False
-        # once we have checked whether a coordinate with a name like name exists in the database this could be set to False
-        # if there was no matching coordinate and then the fiter wont be displayed
+        # once we have checked whether a coordinate with a name like name exists in the database is_valid could be set to False
+        # if there was no matching coordinate and is_valid=False then the filter wont be displayed
         self.is_valid=True 
         self.min_val=None
         self.max_val=None
@@ -354,7 +354,7 @@ class Coord_filter:
             self.min_val=None
         else:
             if self.is_time:
-                self.min_val=dt.datetime.strptime(min_val, '%Y-%m-%d')
+                self.min_val=dt.datetime.strptime(min_val, '%Y-%m-%d').timestamp() # keep as epoch time
             else:
                 self.min_val=float(min_val)
 
@@ -363,11 +363,13 @@ class Coord_filter:
             self.max_val=None
         else:
             if self.is_time:
-                self.max_val=dt.datetime.strptime(max_val, '%Y-%m-%d')
+                self.max_val=dt.datetime.strptime(max_val, '%Y-%m-%d').timestamp() # keep as epoch time
             else:
                 self.max_val=float(max_val)
 
 # Coord_metadata holds the data that is in the Coord table
+# Coordinates that hold time information will store the time as the netcdf file did with accompanying units and calendar
+# but when comparing times we will convert to epoch times
 class Coord_metadata:
 
     def __init__(self,*args):
@@ -394,7 +396,7 @@ class Coord_metadata:
     # if the coordinate values were not evenly spaced eg pressure levels, the actual values can be
     # found in the Discrete_Coord_Values table 
     # inputs:
-    #    row is a single row form the SELECT from Coord table
+    #    row is a single row from the SELECT from Coord table
     #    cur is a cursor on the database
     #-------------------------------------------------------------------------------------------------------
     def init_from_database(self,row, cur):
@@ -425,7 +427,7 @@ class Coord_metadata:
     #--------------------------------------------------
     # initiate from reading datafile (coord_values can be an empty list)
     #--------------------------------------------------
-    def init_from_data(self,cid, name, coord_values):
+    def init_from_data(self,cid, name, coord_values, thread_name):
         self.cid=cid
         self.name=name
         self.delta=0
@@ -437,18 +439,33 @@ class Coord_metadata:
         if self.nvals>0:
             assert(isinstance(coord_values[0], str)==False) # we don't handle str type coord values
             if hasattr(coord_values, 'mask'):
-                coord_values2=coord_values.data
-                ix=np.where(coord_values.mask==True)
-                coord_values2[ix]=np.nan
-                if len(ix[0])>0:
-                    print(f'Coord_metadata.init_from_data(): cid {cid} has masked coord values')
+                # there are occasions when the coord_values are integer but have a mask
+                # in that case we need to convert coord_values to float so we can set the masked values to nan
+                if isinstance(coord_values.data[0], np.int64) or isinstance(coord_values.data[0], np.int32) or isinstance(coord_values.data[0], int): # if the values were integer we have to cast to float so we can add nan
+                    print(thread_name, 'Coord_metadata.init_from_data():', self.name, 'coord values type', type(coord_values.data[0]))
+                    coord_values2=np.zeros(len(coord_values.data))
+                    coord_values2[:]=coord_values.data
+                else:
+                    coord_values2=coord_values.data
+                # sometimes mask is not an array when data is
+                if isinstance(coord_values.mask, np.ndarray):
+                    ix=np.where(coord_values.mask==True)
+                    if len(ix[0])>0:
+                        coord_values2[ix]=np.nan
+                        print(f'{thread_name}: Coord_metadata.init_from_data(): cid {self.cid} {self.name} has masked coord values')
+                else:
+                    # check the mask is false otherwise all data is nan
+                    assert(coord_values.mask==False)
                 coord_values=coord_values2
 
-            self.min_val=float(np.amin(coord_values))
-            self.max_val=float(np.amax(coord_values))
+            self.min_val=float(np.nanmin(coord_values))
+            self.max_val=float(np.nanmax(coord_values))
 
             if self.nvals>1:
                 deltas=abs(coord_values[1:]-coord_values[:-1])
+                # in case there are some nan values just use the non-nan deltas
+                ix=np.where(np.isfinite(deltas))
+                deltas=deltas[ix[0]]
                 delta_deltas=deltas[1:]-deltas[:-1]
                 ix=np.where(abs(delta_deltas)>0.0001)
                 if len(ix[0])==0:
@@ -456,7 +473,6 @@ class Coord_metadata:
                 else:
                     self.values=[float(v) for v in coord_values]
         else:
-            print(f'Coord_metadata.init_from_data(): cid {cid} has no coord_values')
             self.min_val=np.nan
             self.max_val=np.nan
 
@@ -476,7 +492,7 @@ class Coord_metadata:
             self.calendar_attrix=len(self.attributes)-1
 
     #----------------------------------------------------------------------------------------
-    # this coordinate is a time coordinate if it has units that start "days" or "hours"
+    # this coordinate is a time coordinate if it has units that start "months/days/hours/seconds since"
     # it may also have calendar attributes but if not, assume gregorian
     #----------------------------------------------------------------------------------------
     def is_time(self):
@@ -484,12 +500,18 @@ class Coord_metadata:
         calendar=None
         if self.units_attrix>=0:
             units=self.attributes[self.units_attrix].value
+            suspected_time=False
             if units.startswith('months') or units.startswith('days') or units.startswith('hours') or units.startswith('seconds') or self.calendar_attrix>=0:
+                suspected_time=True
+                # this is how I was testing it but it ought to have since in he units too
+            if units.startswith('months since') or units.startswith('days since') or units.startswith('hours since') or units.startswith('seconds since') or self.calendar_attrix>=0:
                 is_time=True
                 if self.calendar_attrix>=0:
                     calendar=self.attributes[self.calendar_attrix].value
                 else:
                     calendar='gregorian'
+            elif suspected_time:
+                print(self.cid, self.name, 'suspected_time but not good units', units)
         return is_time, calendar
 
     #----------------------------------------------------------------------------------------
@@ -500,22 +522,26 @@ class Coord_metadata:
     #---------------------------------------------------------------------------------------
     def matches_coord(self, other):
         matches=False
-        # handle min_val or max_val being NaN
-        min_val_match= ((np.isnan(self.min_val) and np.isnan(other.min_val)) or abs(self.min_val-other.min_val)<1e-6) 
-        max_val_match= ((np.isnan(self.max_val) and np.isnan(other.max_val)) or abs(self.max_val-other.max_val)<1e-6) 
-        if self.name==other.name and self.nvals==other.nvals and min_val_match and max_val_match and abs(self.delta-other.delta)<1e-6:
-            matches=True
-            if len(self.values)>0:
-                ix=np.where(abs(np.asarray(self.values)-np.asarray(other.values))>1e-6)
-                if len(ix[0])>0:
-                    matches=False
+        if self.name==other.name and self.nvals==other.nvals:
+            # handle min_val or max_val being NaN
+            min_val_match= ((np.isnan(self.min_val) and np.isnan(other.min_val)) or abs(self.min_val-other.min_val)<1e-6) 
+            max_val_match= ((np.isnan(self.max_val) and np.isnan(other.max_val)) or abs(self.max_val-other.max_val)<1e-6)
+            values_match=False
+            if len(self.values)>0 and len(other.values)>0:
+                if np.all(abs(np.asarray(self.values)-np.asarray(other.values))<1e-6):
+                    values_match=True
+            else:
+                if abs(self.delta-other.delta)<1e-6:
+                    values_match=True
+            if min_val_match and max_val_match and values_match:
+                matches=True
 
         # now check the attributes - they must both match but don't need to be in the same order
         if matches:
             nattr=len(self.attributes)
             nother_attr=len(other.attributes)
             if nattr!=nother_attr:
-                matches==False
+                matches=False
             else:
                 for i in range(nattr):
                     name_matches=np.asarray([attr.name==self.attributes[i].name for attr in other.attributes])
@@ -531,6 +557,46 @@ class Coord_metadata:
                             break
 
         return matches
+        
+    #----------------------------------------------------------------------------------------
+    # Check whether this coord has same metadata as given coord but don't worry about values
+    # Both should have matching name and attribute names and values
+    # This is used to check the coordinates of the variables to see if they are the same type
+    # for example a time coordinate that has different values to a different time coordinate matches type
+    # as long as the calendar is the same
+    # other is another instance of coord
+    #---------------------------------------------------------------------------------------
+    def matches_coord_type(self, other, thread_name):
+        matches=False
+        if self.name==other.name:
+            matches=True
+            # now check the attributes - they must both match but don't need to be in the same order
+            nattr=len(self.attributes)
+            nother_attr=len(other.attributes)
+            if nattr!=nother_attr:
+                matches=False
+                print(thread_name+' Coord_metadata.matches_coord_type(): mismatching number of attributes of coords', self.cid, other.cid)
+            else:
+                is_time, calendar=self.is_time()
+                for i in range(nattr):
+                    name_matches=np.asarray([attr.name==self.attributes[i].name for attr in other.attributes])
+                    ix=np.where(name_matches)
+                    if len(ix[0])==0:
+                        matches=False
+                        break
+                    else:
+                        # allow times to have different units but they must have the same calendar
+                        if is_time==False or self.attributes[i].name!='units':
+                            # name matches but does value?
+                            j=ix[0][0]
+                            if self.attributes[i].value!=other.attributes[j].value:
+                                matches=False
+                                break
+                if matches==False:
+                    print(thread_name+' Coord_metadata.matches_coord_type(): mismatching attributes of coords', self.cid, other.cid, self.name, 'attribute index',i)
+        else:
+            print(thread_name+' Coord_metadata.matches_coord_type(): mismatching name of coords', self.name, other.name)
+        return matches
 
     #----------------------------------------------------------------------------------------
     # code to insert coord into Coords table, any values into Discrete_Coord_Values table
@@ -540,7 +606,14 @@ class Coord_metadata:
     def insert_into_database(self, thread_name, cur,verbose=False):
         # create Coord entry
         if verbose:
-            print(thread_name, ': Creating Coord entry', self.cid, self.name, 'nvals=',self.nvals, 'min=',self.min_val, 'max=',self.max_val, 'every', self.delta)
+            if self.delta>0:
+                extra=f'every {self.delta}'
+            else:
+                if self.nvals>0:
+                    extra='with discrete values'
+                else:
+                    extra='no values'
+            print(thread_name, ' Coord_metadata.insert_into_database(): Creating Coord entry', self.cid, self.name, 'nvals=',self.nvals, 'min=',self.min_val, 'max=',self.max_val, extra)
         cur.execute("""INSERT INTO Coords (cid, name, nvals, min_val, max_val, delta) VALUES (?,?,?,?,?,?)""",
                     (self.cid, self.name, self.nvals, self.min_val, self.max_val, self.delta))
         if len(self.values)>0:
@@ -549,12 +622,30 @@ class Coord_metadata:
         if len(self.attributes)>0:
             for att in self.attributes:
                 if verbose:
-                    print(thread_name, ': creating coord attribute for cid',self.cid, att.name,att.value) 
+                    print(thread_name, ' Coord_metadata.insert_into_database(): creating coord attribute for cid',self.cid, att.name,att.value) 
                 cur.execute("""INSERT INTO Coord_Attributes (cid, name, value) VALUES (?,?,?)""", (self.cid, att.name, att.value))
                 
     #----------------------------------------------------------------------------------------
-    # this function returns the min_val, max_val and delta value of this coordinate converted
-    # to datetime objects and the delta to a number of hours if this is a time coord.
+    # convert value to an epoch time - should only be called if we know this is a datetime coordinate
+    #----------------------------------------------------------------------------------------
+    def get_epoch_time(self, value):
+        if np.isnan(value):
+            epoch=value
+        else:
+            if self.calendar_attrix>=0:
+                calendar=self.attributes[self.calendar_attrix].value
+            else:
+                calendar='gregorian'
+            this_date=num2date(value,units=self.attributes[self.units_attrix].value,calendar=calendar)
+            epoch_delta=this_date-num2date(0, 'hours since 1970-01-01', calendar=calendar)
+            epoch=epoch_delta.days*24*3600+epoch_delta.seconds
+
+        return epoch
+    
+    #----------------------------------------------------------------------------------------
+    # this function returns the min_val, max_val and delta value of this coordinate
+    # If the coordinate is a time coordinate the values are returned as epoch times for min and max
+    # and number of hours for delta.
     #----------------------------------------------------------------------------------------
     def get_min_max_delta(self):
         min_val=self.min_val
@@ -563,28 +654,20 @@ class Coord_metadata:
         is_time, calendar=self.is_time()
         if is_time:
             units=self.attributes[self.units_attrix].value
-            # convert the values of this coordinate to dates to get min max and delta in hours
-            if np.isnan(self.min_val):
-                # have to assume 0 to get a date from units
-                min_val=num2date(0,units=units,calendar=calendar)
-            else:
-                min_val=num2date(self.min_val,units=units,calendar=calendar)
-            if np.isnan(self.max_val):
-                # have to assume 0 to get a date from units
-                max_val=num2date(0,units=units,calendar=calendar)
-            else:
-                max_val=num2date(self.max_val,units=units,calendar=calendar)
+            # convert the values of this coordinate to epoch times to get min max and delta in hours
+            min_val=self.get_epoch_time(self.min_val)
+            max_val=self.get_epoch_time(self.max_val)
             if self.nvals>1:
                 if self.delta==0:
                     # we had unevenly spaced dates but calculate mean spacing
-                    delta_dates=max_val-min_val
-                    delta=delta_dates.days*24+delta_dates.seconds/3600 # delta in hours
+                    delta_epoch=max_val-min_val
+                    delta=delta_epoch/3600 # delta in hours
                     # average delta is this divided by nvals
                     delta=delta/self.nvals
                    
                 else:
                     next_date=num2date(self.min_val+self.delta,units=units,calendar=calendar)
-                    delta_dates=next_date-min_val
+                    delta_dates=next_date-num2date(self.min_val,units=units,calendar=calendar)
                     delta=delta_dates.days*24+delta_dates.seconds/3600 # delta in hours
 
         return min_val, max_val, delta
@@ -609,18 +692,21 @@ class Coord_metadata:
         max_line_len=0
         is_time, calendar= self.is_time()
         if is_time:
-            min_date, max_date,delta_hours=self.get_min_max_delta()
-            min_val=min_date # return this also
+            min_val, max_val, delta_hours=self.get_min_max_delta()
+            min_date=dt.datetime.fromtimestamp(min_val)
             min_str=min_date.strftime('%Y/%m/%d %H:%M')
+
             if self.nvals<=1:
                 this_str=min_str
                 max_line_len=len(this_str)
             else:
+                max_date=dt.datetime.fromtimestamp(max_val)
                 max_str=max_date.strftime('%Y/%m/%d %H:%M')
+                #print('get_min_max_delta_str(): coord', self.cid, self.name, min_str, max_str, delta_hours, 'hours', self.nvals, 'values')
                 # check delta time is in sensible units - currently in hours
                 delta_units='hours'
                 delta_time=delta_hours
-                if delta_hours>24:
+                if delta_hours>=24:
                     delta_days=delta_hours/24
                     delta_units='days'
                     delta_time=delta_days
@@ -628,13 +714,13 @@ class Coord_metadata:
                         delta_months=delta_days/30
                         delta_units='months'
                         delta_time=delta_months
-                # if we have monthly data the times will not be evenly spaced but we cannot print all of them
+               # if we have monthly data the times will not be evenly spaced but we cannot print all of them
                 # we can give range and state every 1 months
-                # if this is not likely to be monthly data we can just print the range
+                # if this is not likely to be monthly data we can just print the range and aproximate delta
                 if self.delta==0 and delta_hours<(24*30):
-                    this_str=min_str+' to '+max_str+' ({n} times)'.format(n=self.nvals)
+                    this_str=min_str+' to '+max_str+', {n:d} values approx every {h:.1f}'.format(n=self.nvals, h=delta_time)+' '+delta_units
                 else:
-                    this_str=min_str+' to '+max_str+' every {h:.1f}'.format(h=delta_time)+' '+delta_units
+                    this_str=min_str+' to '+max_str+', {n:d} values every {h:.1f}'.format(n=self.nvals, h=delta_time)+' '+delta_units
                 max_line_len=len(this_str)
         else:
             min_val=self.min_val
@@ -664,11 +750,11 @@ class Coord_metadata:
                    
             else:
                 if self.nvals==0:
-                    this_str='Unknown        ' # padd with some spaces so user can see title
+                    this_str='Dimension with no values'
                 elif self.nvals==1:
                     this_str='{minv:.2f} '.format(minv=self.min_val)+units
                 else:
-                    this_str='{minv:.2f} to {maxv:.2f} every {delt:.2f} '.format(minv=self.min_val, maxv=self.max_val,delt=self.delta)+units
+                    this_str='{minv:.2f} to {maxv:.2f}, {n:d} values, every {delt:.2f} '.format(minv=self.min_val, maxv=self.max_val,n=self.nvals,delt=self.delta)+units
                 max_line_len=len(this_str)
 
         min_max_delta_str=(this_str, nlines, max_line_len, min_val)
@@ -680,15 +766,23 @@ class Coord_metadata:
     #----------------------------------------------------------------------------------------
     def print(self):
         info_str, nlines, max_line_len, min_val=self.get_min_max_delta_str()
-        print(self.cid, self.name, 'nvals=',self.nvals, info_str)
+        print('cid=',self.cid, self.name, 'nvals=',self.nvals, info_str)
         for attr in self.attributes:
             print('\t',attr.name,attr.value)
 
 
-#--------------------------------------------------
+#--------------------------------------------------------------------------------------------------------
 # Variable_metadata holds the metadata for a variable
-#--------------------------------------------------
+# This handles the cids and fids related to this variable that are stored in Coords_Fids_Of_Variables Table
+# In this class we will store a set of cids related to each file for each dimension.
+# For variables with no dimensions, a set of fid cid pairs for each fid but with cid=-1 will be stored in the database
+# For variables with dimensions that have the same cid for all fids, we will store the cid and fid=-1 to save space in
+# the database but we can only do this if there is a dimension for which we will save all the fids (ie there must be
+# a multi_dimension.
+#---------------------------------------------------------------------------------------------------------
 class Variable_metadata:
+
+    max_fids_cids_to_print=10
 
     def __init__(self,*args):
         # args are row and cur for initiation from database and vid and name for initiation from data
@@ -720,28 +814,37 @@ class Variable_metadata:
         res_cids_fids=cur.execute("""SELECT cid, fid FROM Coords_Fids_Of_Variables WHERE vid=?""", (self.vid,)).fetchall()
         # cid fid pairs are read out in the order they were put in,
         # i.e. each dimension will be read for all the fids, if the fid=-1 then only 1 cid will be read for that dimension
-
         cids_fids_arr =np.asarray(list(map(list,res_cids_fids)))
-        fids=cids_fids_arr[:,1]
-        cids=cids_fids_arr[:,0]
-        ix=np.where(fids>=0)
-        nfids=len(np.unique(np.asarray(fids[ix[0]])))
-        self.cids=np.zeros((self.ndims,nfids),int)
-        # cid fid pairs are read out in the order they were put in,
-        # i.e. each dimension will be read for all the fids, if the fid=-1 then only 1 cid will be read for that dimension
+        if len(cids_fids_arr.shape)==2:
+            fids=cids_fids_arr[:,1]
+            cids=cids_fids_arr[:,0]
+            ix=np.where(fids>=0) # don't use the fids that are -1
+            unique_fids=np.unique(np.asarray(fids[ix[0]]))
+            nfids=len(unique_fids)
+            if self.ndims>0:
+                self.cids=np.zeros((self.ndims,nfids),int)
+                # cid fid pairs are read out in the order they were put in,
+                # i.e. each dimension will be read for all the fids, if the fid=-1 then only 1 cid will be read for that dimension
 
-        r=0
-        for d in range(self.ndims):
-            if fids[r]==-1:
-                self.cids[d,:]=cids[r]
-                r+=1
+                r=0
+                for d in range(self.ndims):
+                    if fids[r]==-1:
+                        self.cids[d,:]=cids[r] # there will only be one cid for this fid
+                        r+=1
+                    else:    
+                        self.cids[d,:]=cids[r:r+nfids]
+                        r+=nfids
+                        if len(np.unique(self.cids[d,:]))>1:
+                            self.multi_dim=d
+                    self.fids=unique_fids
             else:
-                self.cids[d,:]=cids[r:r+nfids]
-                self.fids=fids[r:r+nfids]
-                r+=nfids
-                if len(np.unique(self.cids[d,:]))>1:
-                    self.multi_dim=d
-
+                self.fids=unique_fids
+                self.cids=cids # will be -1
+        else:
+            print('Variable_metadata.init_from_database() no fids or cids! for var', self.vid, self.name)
+            self.cids=[]
+            self.fids=[]
+             
         #print('Variable_metadata.init_from_database():', self.name, 'vid=', self.vid, nfids, 'unique fids', self.fids, 'cids=',self.cids, 'multi_dim=',self.multi_dim)
 
         # get the attributes
@@ -754,6 +857,7 @@ class Variable_metadata:
     # initiation.
     # When another file is read with the same variables but different coordinates, we will append that fid
     # and its coordinate cids to the existing variable
+    # We don't know at the start how many files this variable will appear in so fids and cids are created as lists.
     #-----------------------------------------------------------------------------------------------------
     def init_from_data(self,vid, name,ndims):
         self.vid=vid
@@ -805,6 +909,7 @@ class Variable_metadata:
     # this copies the fid and the cids from other
     # this is used when we have worked out that a new variable is the
     # same as this one from a different file (fid)
+    # other will only have one cid for each dimension and one fid
     #-------------------------------------------------------------------
     def copy_fid_cids_from_other(self,other):
         if self.ndims!=other.ndims:
@@ -813,7 +918,6 @@ class Variable_metadata:
             # other will just have one fid and cid for each dimension
             assert(len(other.fids)==1)
             other_cids=[other.cids[d][0] for d in range(other.ndims)]
-            print('Variable_metadata.copy_fid_cids_from_other():', self.name, self.vid, 'copying fid and cids from vid=', other.vid, 'in file', other.fids, 'to my files', self.fids, 'multi_dim=',self.multi_dim, 'other cids', other_cids)
             self.add_cids_for_fid(other.fids[0],other_cids)
             # check if we now have a multi dimension
             for d in range(self.ndims):
@@ -840,27 +944,35 @@ class Variable_metadata:
         
     #--------------------------------------------------------------
     # check whether this variable has same metadata as given variable
+    # cids for one dimension may be different but the name of the dimension should be the same
+    # if more than one dimension has mismatching values we cannot have more than one multi dimension
+    # so other variable can't match self.
     # other is another instance of Variable
     #-------------------------------------------------------------
-    def matches_variable(self, other, verbose):
+    def matches_variable(self, other, coords, verbose, thread_name):
         matches=False
         # some attributes can be different in different files and I've even found that sometimes
         # they are string and sometimes float!
         # the ones that should definitely match are:
         must_match_attr_names=['long_name','standard_name','units', 'dataset','statistic', 'time_step', 'var_desc']
+        if verbose:
+            if len(self.fids)>self.max_fids_cids_to_print:
+                fids_str=f'{self.fids[:int(max_fids_cids_to_print/2)]}...{self.fids[-int(max_fids_cids_to_print/2):]}'
+            else:
+                fids_str=f'{self.fids}'
         # and the attribute names should all match
         if self.name==other.name and self.ndims==other.ndims:
             matches=True
             # now check the attributes:
-            # they must having matching names of attributes and all str attribute values should match but
+            # they must have matching names of attributes and all str attribute values should match but
             # they don't have to be in the same order
             nattr=len(self.attributes)
             nother_attr=len(other.attributes)
             other_attrnames=np.asarray([attr.name for attr in other.attributes])
             if nattr!=nother_attr:
                 if verbose:
-                    print('Variable_metadata.matches_variable():', self.vid, 'in files', self.fids, 'other in file', other.fids, 'mismatching number of attributes')
-                matches==False
+                    print(thread_name+' Variable_metadata.matches_variable():', self.name, self.vid, 'in files', fids_str, 'other in file', other.fids, 'mismatching number of attributes')
+                matches=False
             else:
                 file_specific_attribute_indices=[]
                 for i in range(nattr):
@@ -874,7 +986,7 @@ class Variable_metadata:
                             # values must match
                             if self.attributes[i].value!=other.attributes[j].value:
                                 if verbose:
-                                    print('Variable_metadata.matches_variable():',self.name, self.attributes[i].name, 'attribute does not match', self.attributes[i].value, other.attributes[j].value)
+                                    print(thread_name+' Variable_metadata.matches_variable():',self.name, self.attributes[i].name, 'attribute does not match', self.attributes[i].value, other.attributes[j].value)
                                 matches=False
                                 break
 
@@ -882,72 +994,116 @@ class Variable_metadata:
                         elif self.attributes[i].value!=other.attributes[j].value:
                             file_specific_attribute_indices.append(i)
 
-        if matches:
+        if matches and self.ndims>0:
            # check each dimension
            ncids_per_dim=np.zeros(self.ndims,int)
            other_matches=np.zeros(self.ndims,int)
+           other_matches_values=np.zeros(self.ndims,int)
+           cids_str='['
            for d in range(self.ndims):
                my_cids=self.get_cids_for_dim(d)
                other_cids=other.get_cids_for_dim(d)
                ncids_per_dim[d]=len(my_cids)
-               if ncids_per_dim[d]==1:
+               if ncids_per_dim[d]==1 and self.multi_dim>=0:
+                   cids_str=cids_str+f', [{my_cids}]'
+                   # we know this is not the multi dim
                    if len(other_cids)==1 and other_cids[0]==my_cids[0]:
                        other_matches[d]=1
-           nmatches=np.sum(other_matches)
-           # we should have at least all dimensions-1 matching and the non matching dim should be the same for all fids
-           if nmatches<self.ndims-1:
-               if verbose:
-                   print('Variable_metadata.matches_variable():',self.name, self.vid, 'does not match dimension',d, 'in my files=', self.fids,'other vid', other.vid, 'other files=',other.fids, 'my cids for dim', self.cids[d], 'other cids for dim',other.cids[d])
-               matches=False
+                       other_matches_values[d]=1
+               else:
+                   if len(my_cids)>self.max_fids_cids_to_print:
+                       this_cids_str=f', [{my_cids[:int(max_fids_cids_to_print/2)]}...{my_cids[-int(max_fids_cids_to_print/2):]}]'
+                   else:
+                       this_cids_str=f', [{my_cids}]'
 
+                   cids_str=cids_str+this_cids_str
+                   # check the coords match even if the cids dont
+                   # other_cids should only have one cid as this is the new variable that we are checking against
+                   assert(len(other_cids)==1)
+                   # if this is the multi dim then the coord should match in all but values and possibly units if it is time
+                   other_matches[d]=coords[my_cids[0]].matches_coord_type(coords[other_cids[0]], thread_name)
+                   other_matches_values[d]=((coords[my_cids[0]].min_val==coords[other_cids[0]].min_val) and (coords[my_cids[0]].max_val==coords[other_cids[0]].max_val) and (coords[my_cids[0]].nvals==coords[other_cids[0]].nvals))
+           nmatches_values=np.sum(other_matches_values)
+           nmatches=np.sum(other_matches)
+           cids_str=cids_str+' ]'
+           # all dims should match coord type
+           if nmatches<self.ndims:
+               if verbose:
+                   print(thread_name+' Variable_metadata.matches_variable():',self.name, self.vid, 'does not match a cid', 'in my files=', fids_str,'my cids=', cids_str, 'other vid', other.vid, 'other files=',other.fids, 'other cids',other.cids)
+               matches=False
+           # we can only have one dim that doesn't match coord values
+           if nmatches_values<self.ndims-1:
+               if verbose:
+                   print(thread_name+' Variable_metadata.matches_variable():',self.name, self.vid, 'too many mismatching cids', 'in my files=', fids_str,'my cids=', cids_str, 'other vid', other.vid, 'other files=',other.fids, 'other cids',other.cids)
+               matches=False
+                                            
         if matches:
             # all important stuff matches but if file_specific attributes don't match set tp FILE_SPECIFIC_VAL
             for i in file_specific_attribute_indices:
                 self.attributes[i].value=FILE_SPECIFIC_VAL
             if verbose:
-                print('Variable_metadata.matches_variable():',self.name, self.vid, 'in files', self.fids, 'matches other vid', other.vid, 'in file', other.fids)
+                print(thread_name+' Variable_metadata.matches_variable():',self.name, self.vid, 'in files', fids_str,'cids=', cids_str, 'matches other vid', other.vid, 'in file', other.fids, 'cids=', other.cids)
            
         return matches
 
     #--------------------------------------------------
     # insert all the variable metadata into the database
+    # if the cids for a dimension are the same for all fids we can save space in the database by setting fid=-1
+    # and only saving one entry for this cid, however we must have a multi-dimension to do this as we need to
+    # store all the fids somewhere
+    # if there are no dimenions the cid will be saved as -1 for each fid
     #--------------------------------------------------
     def insert_into_database(self,thread_name,cur,verbose=False):
         if verbose:
-            print(thread_name, ': Creating Variable entry', self.vid, self.name)
+            print(thread_name, ' Variable_metadata.insert_into_database(): Creating Variable entry', self.vid, self.name)
         cur.execute("""INSERT INTO Variables (vid, name, ndims) VALUES (?,?,?)""", (self.vid, self.name, self.ndims))
         nfids=self.get_nfiles()
 
         for d in range(self.ndims):
             this_cids=self.get_cids_for_dim(d)
-            if len(this_cids)==1 and nfids>1 and self.multi_dim>=0:
-                # make one entry for the unique cid with fid=-1 to indicate all files have the same cid for
-                # this dimension but only if there is a multi dimension where we will be storing all the fids
-                # note that entries are in the order of the dimensions
-                fid=-1
+            if len(this_cids)==1:
+                # the cids are the same for all files
                 cid=this_cids[0]
-                if verbose:
-                    print(thread_name, ': var={} vid={} creating cid={} fid={} for dimension {}'.format(self.name, self.vid, cid, fid, d))
-                cur.execute("""INSERT INTO Coords_Fids_Of_Variables (vid, cid, fid) VALUES (?,?,?)""", (self.vid, cid, fid))
+                if nfids>1 and self.multi_dim>=0:
+                    # make one entry for the unique cid with fid=-1 to indicate all files have the same cid for
+                    # this dimension (there must be a multi dim, otherwise we wont save the fids anywhere)
+                    # note that entries are in the order of the dimensions
+                    fid=-1
+                    if verbose:
+                        print(thread_name, ' Variable_metadata.insert_into_database(): var={} vid={} creating cid={} fid={} for dimension {}'.format(self.name, self.vid, cid, fid, d))
+                    cur.execute("""INSERT INTO Coords_Fids_Of_Variables (vid, cid, fid) VALUES (?,?,?)""", (self.vid, cid, fid))
+                else:
+                    if verbose:
+                        print(thread_name, ' Variable_metadata.insert_into_database(): var={} vid={} creating cid={} for fids={} for dimension {}'.format(self.name, self.vid, cid, self.fids, d))
+                    for f in range(nfids):
+                        fid=self.fids[f]
+                        cur.execute("""INSERT INTO Coords_Fids_Of_Variables (vid, cid, fid) VALUES (?,?,?)""", (self.vid, cid, fid))           
+                   
             else:
+                # This is the case where there is a different cid for each fid
                 if verbose:
-                   print(thread_name, ': vid={} creating {} cids and fids for dimension {}'.format(self.vid, len(self.cids[d]), d), self.fids, self.cids)
+                   print(thread_name, ' Variable_metadata.insert_into_database(): var={} vid={} creating cids={} and fids={} for dimension {}'.format(self.name, self.vid, this_cids, self.fids, d))
                 for f in range(nfids):
-                    cid=self.cids[d][f]
+                    cid=this_cids[f]
                     fid=self.fids[f]
                     cur.execute("""INSERT INTO Coords_Fids_Of_Variables (vid, cid, fid) VALUES (?,?,?)""", (self.vid, cid, fid))
+        if self.ndims==0:
+            # this is the case where there is not an actual cid but we need to add the fids with -1 for a cid
+            cid=int(-1)
+            if verbose:
+                print(thread_name, ' Variable_metadata.insert_into_database(): var={} vid={} creating cid={} for fids={}'.format(self.name, self.vid, cid, self.fids))
+            for f in range(nfids):
+                fid=self.fids[f]
+                cur.execute("""INSERT INTO Coords_Fids_Of_Variables (vid, cid, fid) VALUES (?,?,?)""", (self.vid, cid, fid))
         for att in self.attributes:
            if verbose:
-               print(thread_name, ': Creating attribute for variable', self.vid, att.name, att.value)
+               print(thread_name, ' Variable_metadata.insert_into_database(): Creating attribute for variable', self.vid, self.name, att.name, att.value)
            cur.execute("""INSERT INTO Var_Attributes (vid, name, value) VALUES (?,?,?)""", (self.vid, att.name, att.value))
 
     #----------------------------------------------------------------------------------------
     # get the dimension which has multiple files and therefore coordinates
     #----------------------------------------------------------------------------------------
     def get_multi_file_dimension(self):
-        if self.multi_dim==-1:
-            print('Variable_metadata.get_multi_file_dimension(): no dimension with more than 1 cid')
-
         return self.multi_dim
 
     #----------------------------------------------------------------------------------------
@@ -1040,13 +1196,13 @@ class Variable_metadata:
     # print info
     #---------------------------------------------------------------------------
     def print(self):
-        print(self.vid, self.name, 'ndims=', self.ndims, 'nfids=',len(self.fids))
+        print('vid=',self.vid, self.name, 'ndims=', self.ndims, 'nfids=',len(self.fids))
+        if len(self.fids)<5:
+            print('\tfids=', self.fids)
         for d in range(self.ndims):
-            if self.multi_dim!=d:
-                print('\tdim', d, ': cid=', self.get_cids_for_dim(d))
+            print('\tdim', d, ': cid=', self.get_cids_for_dim(d))
         for attr in self.attributes:
-            is_float=isinstance(attr.value, float)    
-            print('\t'+attr.name, attr.value, 'is float=',is_float)
+            print('\t'+attr.name, attr.value)
 
 
 

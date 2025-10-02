@@ -1,0 +1,12 @@
+name: data_catalogue
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.13
+  - numpy
+  - pandas
+  - sqlite
+  - netcdf4
+  - hdf5
+  - h5py

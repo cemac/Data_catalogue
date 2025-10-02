@@ -22,14 +22,54 @@ from db_functions import *
 
 # set default font for Labels and Text
 font=('Ariel', 11)
-
 # global variables
 databases=[]
 unique_dirnames=[]
+current_dix=-1 # index to unique_dirnames for current dir
 unique_varnames=[]
+current_var='*'
 verbose=False
 coord_filters=[]
 current_db=-1 # index to current database set by dirname which is initially all
+
+# class for structuring the list of directories so we can have submenus
+# this is recursive
+class Directory:
+    def __init__(self, index, all_dirnames):
+        self.index=index
+        
+        self.subdirs=[]
+        this_root=all_dirnames[index]
+        i=index+1
+        while i <len(all_dirnames):
+            if all_dirnames[index] in all_dirnames[i]:
+                wsplit=all_dirnames[i].split(this_root+'/')
+                if len(wsplit)>1:
+                    self.subdirs.append(Directory(i, all_dirnames))
+                    i=self.subdirs[-1].next_index
+                else:
+                    i+=1
+            else:
+                break
+        self.next_index=i
+        
+    def print(self, tab, all_dirnames):
+        print(tab, all_dirnames[self.index])
+        for dir in self.subdirs:
+            dir.print(tab+'\t', all_dirnames)
+
+    def create_menu(self, all_dirnames, parent_menu):
+        if len(self.subdirs)==0:
+            # just create the command to set this dir in the parent
+            parent_menu.add_command(label=all_dirnames[self.index], command=lambda d=self.index: set_dirname(d))
+        else:
+            # this has subdirs so create a cascade menu
+            self.menu = Menu(parent_menu, tearoff=False)
+            parent_menu.add_cascade(label=all_dirnames[self.index], menu=self.menu)
+            self.menu.add_command(label=all_dirnames[self.index], command=lambda d=self.index: set_dirname(d))
+            for d in range(len(self.subdirs)):
+                self.subdirs[d].create_menu(all_dirnames, self.menu)
+
 
 # only update the status every UPDATE_COUNT times round a loop otherwise it slows things down too much
 UPDATE_COUNT=100
@@ -139,6 +179,7 @@ class Database_reader:
         self.coords[c]=Coord_metadata(row, self.cur)
         (this_str, nlines, max_line_len, min_val)=self.coords[c].get_min_max_delta_str()
         self.coords_str[c]=this_str
+        print('coord', self.coords[c].cid, self.coords[c].name, this_str)
         self.coords_nlines[c]=nlines
         self.coords_max_line_len[c]=max_line_len
         self.coords_min_vals[c]=min_val
@@ -182,23 +223,30 @@ class Database_reader:
 def set_dirname(d):
     global current_db
     global unique_dirnames
+    global current_dix
     global databases
     global verbose
-    if dirname_lab["text"]!=unique_dirnames[d]:
+    
+    if d==-1:
+        this_dirname='*'
+    else:
+        this_dirname=unique_dirnames[d]
+
+    if dirname_lab["text"]!=this_dirname:
         if verbose:
-            print('set_dirname(): setting dirname to', unique_dirnames[d])
-        dirname_lab["text"]=unique_dirnames[d]
+            print('set_dirname(): setting dirname to', this_dirname)
+        dirname_lab["text"]=this_dirname
         results['state']='normal'
         results.delete("1.0",END)
         results['state']='disabled'
         # work out which database this dirname is in
-        if unique_dirnames[d]=='*':
+        if this_dirname=='*':
             current_db=-1
         else:
-            for d in range(len(databases)):
-                matches=databases[d].has_dirpath(unique_dirnames[d])
+            for dbix in range(len(databases)):
+                matches=databases[dbix].has_dirpath(this_dirname)
                 if matches:
-                    current_db=d
+                    current_db=dbix
                     if verbose:
                         print('set_dirname(): current database is now', databases[current_db].dbname)
                     if len(databases[current_db].dirpaths)>1:
@@ -230,32 +278,45 @@ def set_filename(d):
     return True
 
 #----------------------------------------------------
-# Variable button has been used to select variable
+# Variable menu has been used to select variable
 #----------------------------------------------------
 def set_variable(v):
     global current_db
-    global unique_varnames
     global databases
+    global unique_varnames
+    global current_var
     global verbose
 
-    if variable_lab["text"]!=unique_varnames[v]:
+    if len(v)==0:
+        print('set_variable(): invalid size of variable index', v)
+        pdb.set_trace()
+        return
+    if v[0]>len(unique_varnames):
+        print('set_variable(): variable index chosen is too big', v)
+        pdb.set_trace()
+        return
+    variable=unique_varnames[v[0]]
+    if current_var!=variable:
         if verbose:
-            print('set_variable(): setting variable to', unique_varnames[v])
-        variable_lab["text"]=unique_varnames[v]
+            print('set_variable(): setting variable to', variable)
+        current_var=variable
+        #variable_lab["text"]=unique_varnames[v]
         results['state']='normal'
         results.delete("1.0",END)
         results['state']='disabled'
         # variable has changed so clear active_variables apart from the one we now want
-        new_var=unique_varnames[v]
         if current_db==-1:
             for db in databases:
-                this_nvars=len(db.active_variables)
-                varnames=np.asarray([db.active_variables[i].name for i in range(this_nvars)])
+                #this_nvars=len(db.active_variables)
+                #varnames=np.asarray([db.active_variables[i].name for i in range(this_nvars)])
                 db.active_variables.clear()
         else:
-            this_nvars=len(databases[current_db].active_variables)
-            varnames=np.asarray([databases[current_db].active_variables[i].name for i in range(this_nvars)])
+            #this_nvars=len(databases[current_db].active_variables)
+            #varnames=np.asarray([databases[current_db].active_variables[i].name for i in range(this_nvars)])
             databases[current_db].active_variables.clear()
+    elif verbose:
+        print('set_variable(): variable already set to', variable)
+
     update_status('')
                 
 #-----------------------------------------------------
@@ -408,24 +469,29 @@ def popupMultiCoordDetails(event,tag,dbix,vix,d):
     coords_max_line_len=databases[dbix].coords_max_line_len[this_cids]
     # combine coord_str with filepath for that coord
     text_str=['']*len(this_cids)
-    max_line_len=[add_coord_filepath(text_str, dbix,coords_str[c],coords_max_line_len[c],this_fids[c],c) for c in range(len(this_cids))]
+    max_line_lens=[add_coord_filepath(text_str, dbix,coords_str[c],coords_max_line_len[c],this_fids[c],c) for c in range(len(this_cids))]
     text_str=''.join(text_str)
     nlines=sum(coords_nlines)
-    max_line_len=max(max_line_len)
-    
+    this_max_line_len=max(max_line_lens)
+    max_line_len=min([this_max_line_len,80])
     info_window = Tk()
     info_window.title(databases[dbix].active_variables[vix].name+': '+databases[dbix].coords[this_cids[0]].name)
     info_window.geometry("+{0}+{1}".format(event.x_root+6, event.y_root+2))
 
     max_height=12
     height=np.amin([max_height,nlines]) # show up to max_height lines as we have a scroll bar
-    text = Text(info_window, borderwidth=1, width=max_line_len, height=height, relief="solid", font=font)
+    text = Text(info_window, borderwidth=1, width=max_line_len, height=height, wrap="none", relief="solid", font=font)
     text.insert(INSERT, text_str)
 
-    ys = Scrollbar(info_window, orient = 'vertical', command = text.yview)
-    text['yscrollcommand'] = ys.set
-    ys.pack(side=RIGHT,fill=Y)
+    if nlines>height:
+        ys = Scrollbar(info_window, orient = 'vertical', command = text.yview)
+        text['yscrollcommand'] = ys.set
+        ys.pack(side=RIGHT,fill=Y)
     text.pack(fill=BOTH)
+    if this_max_line_len>max_line_len:
+        xs = Scrollbar(info_window, orient = 'horizontal', command = text.xview)
+        text['xscrollcommand'] = xs.set
+        xs.pack(side=BOTTOM,fill=X)
     update_status('')
 
     info_window.mainloop()
@@ -479,7 +545,7 @@ def popupFilesDetails(event,file_tag,dbix,vix):
             ix=np.argsort(min_vals)
             this_fids=this_fids[ix]
         else:
-            print(f'popupFilesDetails(): cannot find multi dimension for var {databases[dbix].active_variables[vix].name} to order fids, cids={databases[dbix].active_variables[vix].cids}')
+            # cannot find multi dimension
             # we will just show them in alphabetical order
             files=[databases[dbix].files_metadata.get_matching_fid(fid) for fid in this_fids]
             filepaths=np.asarray([databases[dbix].dirpaths[this_file.did]+this_file.filename for this_file in files])
@@ -509,9 +575,10 @@ def popupFilesDetails(event,file_tag,dbix,vix):
         text.insert(INSERT, lines[l],(file_tag))
         text.tag_bind(file_tag, '<Button-1>', lambda e,dbix=dbix,fid=this_fids[l]:popupFileAttributes(e,file_tag,dbix,fid))
 
-    ys = Scrollbar(info_window, orient = 'vertical', command = text.yview)
-    text['yscrollcommand'] = ys.set
-    ys.pack(side=RIGHT,fill=Y)
+    if nlines>height:
+        ys = Scrollbar(info_window, orient = 'vertical', command = text.yview)
+        text['yscrollcommand'] = ys.set
+        ys.pack(side=RIGHT,fill=Y)
     xs = Scrollbar(info_window, orient = 'horizontal', command = text.xview)
     text['xscrollcommand'] = xs.set
     xs.pack(side=BOTTOM,fill=X)
@@ -576,15 +643,18 @@ def search_db():
     global databases
     global current_db
     global verbose
+    global unique_varnames
+    global current_var
 
     results['state']='normal'
-    results.delete("1.0",END)        
+    results.delete("1.0",END)
+         
+#    current_var=variable_lab["text"]
     if verbose:
-        print('search_db():',dirname_lab["text"]+'/*'+filename_entry.get(),'variable=',variable_lab["text"])
+        print('search_db():',dirname_lab["text"]+'/*'+filename_entry.get(),'variable=',current_var)
 
     dirname=dirname_lab["text"]
     filename_exp=filename_entry.get()
-    variable=variable_lab["text"]
     # if we have not changed the variable since last search db.active_variables will still have the variables in it
     nvars=0
     nfiles=0
@@ -611,7 +681,7 @@ def search_db():
                     this_ncoords=db.read_coordinates(verbose)
                 this_nvars=len(db.active_variables)
                 if this_nvars==0:
-                    this_nvars=db.read_variables(variable,verbose)
+                    this_nvars=db.read_variables(current_var,verbose)
                 update_status('checking which variables are valid')
                 for vix in range(this_nvars):
                     is_valid, ftag, vtag, ctag=show_valid_variable(dbix, fids, vix, ftag, vtag, ctag)
@@ -633,7 +703,7 @@ def search_db():
                 this_ncoords=databases[current_db].read_coordinates(verbose)
             nvars=len(databases[current_db].active_variables)
             if nvars==0:
-                nvars=databases[current_db].read_variables(variable,verbose)
+                nvars=databases[current_db].read_variables(current_var,verbose)
             if verbose:
                 print('search_db(): read', nvars, 'variables')
             update_status('checking which variables are valid')
@@ -645,6 +715,7 @@ def search_db():
     update_status('Found {} files, {} variables in database ({} valid)'.format(nfiles, nvars, nvars_valid))
 
     results['state']='disabled'
+    print('done search_db()')
 
 ##############################################################################################
 # start of main code
@@ -680,8 +751,8 @@ else:
                 unique_dirnames=unique_dirnames+databases[-1].dirpaths
                 unique_varnames=unique_varnames+databases[-1].unique_varnames
 
-if len(unique_dirnames)>1:
-    unique_dirnames=['*']+unique_dirnames
+dir_struct=Directory(0, unique_dirnames)
+
 unique_varnames=['*']+list(np.unique(np.asarray(unique_varnames)))
 if verbose:
     print(len(unique_varnames)-1, 'unique varnames')
@@ -718,33 +789,40 @@ status_bar.grid(row=0, column=0, sticky='W', pady=2)
 dirname_mb = Menubutton(setup_frame, text ="Directory", relief=RAISED, width=10, font=font)
 dirname_mb.menu = Menu ( dirname_mb, tearoff = 0 )
 dirname_mb["menu"] = dirname_mb.menu
-for d in range(len(unique_dirnames)):
-    dirname_mb.menu.add_command(label=unique_dirnames[d], command=lambda d=d: set_dirname(d), font=font)
+dirname_mb.menu.add_command(label='*', command=lambda d=-1: set_dirname(d))
+dir_struct.create_menu(unique_dirnames, dirname_mb.menu) # this recursively creates the cascaded menus
 dirname_mb.grid(row=0,column=0, sticky='W', pady=2)
 # the label to show what has been chosen
-dirname_lab = Label(master=setup_frame, text=unique_dirnames[0],width=70,borderwidth=1, anchor='w', relief="solid", font=font)
+dirname_lab = Label(master=setup_frame, text='*',width=90,borderwidth=1, anchor='w', relief="solid", font=font)
 dirname_lab.grid(row=0, column=1, sticky='W', pady=2, columnspan=5)
 
 # selecting variable
-variable_mb = Menubutton(setup_frame, text ="Variable",relief=RAISED, width=10, font=font)
-variable_mb.menu = Menu ( variable_mb, tearoff = 0 )
-variable_mb["menu"] = variable_mb.menu
-for v in range(len(unique_varnames)):
-    variable_mb.menu.add_command(label=unique_varnames[v], command=lambda v=v: set_variable(v), font=font)
-#vs = Scrollbar(variable_mb, orient = 'vertical', command = variable_mb.menu.yview)
-#variable_mb.menu['yscrollcommand'] = vs.set
-#vs.pack(side=RIGHT,fill=Y)
-variable_mb.grid(row=1,column=0, sticky='W', pady=2)
+var_frame = Frame(master=setup_frame)
+choicesvar = StringVar(value=unique_varnames)
+variable_text = Label(master=var_frame, text='Variable:',width=10, font=font)
+variable_text.pack(side=LEFT)
+variable_menu = Listbox(var_frame, width=30, height=5, font=font, listvariable=choicesvar)
+variable_menu.bind("<<ListboxSelect>>", lambda e: set_variable(variable_menu.curselection()))
+variable_menu.pack(side=LEFT)
+ys = Scrollbar(var_frame, orient = 'vertical', command = variable_menu.yview)
+variable_menu.configure(yscrollcommand=ys.set)
+ys.pack(side=RIGHT, fill=Y)
+var_frame.grid(row=1, column=0, sticky='W', pady=2, columnspan=5)
+#variable_mb = Menubutton(setup_frame, text ="Variable",relief=RAISED, width=10, font=font)
+#variable_mb.menu=Menu ( variable_mb, tearoff = 0 )
+#for v in range(len(unique_varnames)):
+#    variable_mb.menu.add_command(label=unique_varnames[v], command=lambda v=v: set_variable(v), font=font)
+#variable_mb.grid(row=1,column=0, sticky='W', pady=2)
 # the label to show what variable has been chosen
-variable_lab = Label(master=setup_frame, text=unique_varnames[0],width=70,borderwidth=1,anchor='w', relief="solid", font=font)
-variable_lab.grid(row=1, column=1, sticky='W', pady=2, columnspan=5)
+#variable_lab = Label(master=setup_frame, text=unique_varnames[0],width=70,borderwidth=1,anchor='w', relief="solid", font=font)
+#variable_lab.grid(row=1, column=1, sticky='W', pady=2, columnspan=5)
 
 # selecting filename - free form so handles regular expressions
 vcmd_filename = (setup_frame.register(set_filename), '%d')
 filename_lab = Label(master=setup_frame, text='Filename:', anchor='w', font=font)
-filename_lab.grid(row=2, column=0, sticky='W', pady=2)
-filename_entry = Entry(master=setup_frame, width=10, font=font, validate="key", validatecommand=vcmd_filename)
-filename_entry.grid(row=2, column=1, sticky='W', pady=2)
+filename_lab.grid(row=5, column=0, sticky='W', pady=2)
+filename_entry = Entry(master=setup_frame, width=50, font=font, validate="key", validatecommand=vcmd_filename)
+filename_entry.grid(row=5, column=1, sticky='W', pady=2)
 #filename_entry.insert(0,'*')
 
 
@@ -753,7 +831,7 @@ vcmd_number = (setup_frame.register(on_validate),
                 '%d', '%P', '%s', '%S')
 vcmd_time = (setup_frame.register(on_validate_time),
                 '%d', '%P', '%s', '%S')
-row=4
+row=7
 for i in range(nfilters):
     width=5
     txt_extra=''

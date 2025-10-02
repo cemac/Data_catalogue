@@ -23,7 +23,7 @@ import threading
 import numpy as np
 import datetime as dt
 import sqlite3
-from netCDF4 import Dataset, num2date, date2num
+from netCDF4 import Dataset
 from db_functions import *
 
 #-----------------------------------------------------------------------------------
@@ -79,11 +79,10 @@ class Read_metadata_thread(threading.Thread):
     # This needs to acquire the lock while determining what the next available fid is
     # inputs:
     #    this_file - an instance of File_metadata to be added to the database (does not have valid fid)
-    #    thread_name - name of thread for printing purposes
     # returns:
     #    this_fid -  the fid of the newly created file entry
     #---------------------------------------------------------------------------------------
-    def create_file_entry(this_file, thread_name):
+    def create_file_entry(self, this_file):
         # acquire lock to access nfiles shared data
         Read_metadata_thread.lock.acquire()
         # find next available fid
@@ -91,7 +90,7 @@ class Read_metadata_thread(threading.Thread):
         this_file.fid=this_fid
         Read_metadata_thread.nfiles+=1
         # store file entry in database
-        this_file.insert_into_database(thread_name, Read_metadata_thread.cur,Read_metadata_thread.verbose)
+        this_file.insert_into_database(self.thread_name, Read_metadata_thread.cur,Read_metadata_thread.verbose)
         Read_metadata_thread.con.commit()
         Read_metadata_thread.lock.release()
 
@@ -102,11 +101,10 @@ class Read_metadata_thread(threading.Thread):
     # if it doesn't exist then add it to coord list with next available cid and insert into database
     # inputs:
     #    this_coord - the new coordinate we need to match or create (does not have a valid cid)
-    #    thread_name - name of thread for printing purposes
     # returns:
     #    this_cid -  the cid of the newly created or matching coordinate
     #-----------------------------------------------------------------------------------------------------------------
-    def create_or_find_matching_coord(this_coord, thread_name):
+    def create_or_find_matching_coord(self, this_coord):
 
         # acquire lock to access coords shared data
         Read_metadata_thread.lock.acquire()
@@ -119,7 +117,7 @@ class Read_metadata_thread(threading.Thread):
             this_cid=this_coord.cid
             matches=True
         if len(ix[0])>1:
-            raise ValueError('Read_metadata_thread.create_or_find_matching_coord(): new coord matches more than one existing coord! '+this_coord.name) 
+            raise ValueError(self.thread_name+' Read_metadata_thread.create_or_find_matching_coord(): new coord matches more than one existing coord! '+this_coord.name) 
 
         if matches==False:
             # we don't have it so append it to coords list and store it in the database
@@ -127,12 +125,12 @@ class Read_metadata_thread(threading.Thread):
             this_cid=ncoords
             this_coord.cid=this_cid
             Read_metadata_thread.coords.append(this_coord)
-            this_coord.insert_into_database(thread_name, Read_metadata_thread.cur,Read_metadata_thread.verbose)
+            this_coord.insert_into_database(self.thread_name, Read_metadata_thread.cur,Read_metadata_thread.verbose)
             Read_metadata_thread.con.commit()
 
         Read_metadata_thread.lock.release()
-        #if matches==True and Read_metadata_thread.verbose:
-        #    print(thread_name, ': matching coordinate exists', this_coord.name, this_coord.cid)
+        if matches==True and Read_metadata_thread.verbose:
+            print(self.thread_name, ' Read_metadata_thread.create_or_find_matching_coord(): matching coordinate exists', this_coord.name, this_coord.cid)
 
         return this_cid
 
@@ -143,21 +141,23 @@ class Read_metadata_thread(threading.Thread):
     # Note we cannot add this_var to the database until the end when we have added all the fid cid pairs
     # inputs:
     #    this_var - the new variable we need to match or create (does not have a valid vid)
-    #    thread_name - name of thread for printing purposes
     #--------------------------------------------------------------------------------------------------------
-    def create_or_find_matching_variable(this_var, thread_name):
+    def create_or_find_matching_variable(self, this_var):
         # acquire lock to access variables shared data
         Read_metadata_thread.lock.acquire()
-        var_matches=np.asarray([var.matches_variable(this_var,Read_metadata_thread.verbose) for var in Read_metadata_thread.variables])
+        var_matches=np.asarray([var.matches_variable(this_var,Read_metadata_thread.coords,Read_metadata_thread.verbose, self.thread_name) for var in Read_metadata_thread.variables])
         # do we already have this variable
         matches=False
         ix=np.where(var_matches)
         if len(ix[0])==1:
             Read_metadata_thread.variables[ix[0][0]].copy_fid_cids_from_other(this_var)
+            if Read_metadata_thread.verbose:
+                print(self.thread_name, ' Read_metadata_thread.create_or_find_matching_variable(): matching variable exists', this_var.name, this_var.vid)
+
             this_var=[]
             matches=True
-        if len(ix[0])>1:
-            raise ValueError('Read_metadata_thread.create_or_find_matching_variable(): new var matches more than one existing var! '+this_var.name) 
+        elif len(ix[0])>1:
+            raise ValueError(self.thread_name+' Read_metadata_thread.create_or_find_matching_variable(): new var matches more than one existing var! '+this_var.name) 
 
         if matches==False:
             # add the new variable
@@ -165,14 +165,13 @@ class Read_metadata_thread(threading.Thread):
             this_var.vid=nvars
             Read_metadata_thread.variables.append(this_var)
 
-        Read_metadata_thread.lock.release()
 
         if Read_metadata_thread.verbose:
             if matches==False:
-                print(thread_name, ': New variable', this_var.name, this_var.vid, 'in files', this_var.fids, 'with cids', this_var.cids)
-            #else:
-            #    print(thread_name, ': matching variable exists', this_var.name, this_var.vid)
+                print(self.thread_name, ' Read_metadata_thread.create_or_find_matching_variable(): New variable', this_var.name, this_var.vid, 'in files', this_var.fids, 'with cids', this_var.cids)
 
+
+        Read_metadata_thread.lock.release()
 
     #-----------------------------------------------------------------------------------
     # initiation of thread to handle a file
@@ -185,7 +184,7 @@ class Read_metadata_thread(threading.Thread):
         threading.Thread.__init__(self)
         self.this_dir=this_dir
         self.filename=filename
-        self.thread_name=threading.current_thread().name
+        self.thread_name=threading.current_thread().name+'_'+filename
 
     #-----------------------------------------------------------------------------------
     # Adds to database the metadata from one netcdf file.
@@ -202,7 +201,7 @@ class Read_metadata_thread(threading.Thread):
 
         try:
             if Read_metadata_thread.verbose:
-                print(self.thread_name,': reading', filepath)
+                print(self.thread_name,' Read_metadata_thread.read_netcdf(): reading', filepath)
             data=Dataset(filepath, "r", format="NETCDF4")
             ok=True
 
@@ -217,7 +216,7 @@ class Read_metadata_thread(threading.Thread):
         this_file=File_metadata(UNKNOWN_ID, self.this_dir.did, self.this_dir.dirpath, self.filename)
         # get the global attributes
         this_file.global_attributes=[Attribute(attrname,getattr(data, attrname)) for attrname in data.ncattrs()]
-        this_fid=Read_metadata_thread.create_file_entry(this_file,self.thread_name)
+        this_fid=self.create_file_entry(this_file)
 
         # get the coords from this file - remember the cids and dimnames to match with the variables
         this_cids=[]
@@ -228,15 +227,15 @@ class Read_metadata_thread(threading.Thread):
         for d in data.dimensions:
             if d in vkeys:
                 # read the information about this coordinate by creating a coordinate instance
-                this_coord=Coord_metadata(UNKNOWN_ID, d, data[d][:])
+                this_coord=Coord_metadata(UNKNOWN_ID, d, data[d][:], self.thread_name)
                 # need to add one attribute at a time so we can check for units and calendar attributes
                 for attrname in data[d].ncattrs():
                     value=getattr(data[d], attrname)
                     this_coord.add_attribute(attrname,value)
             else:
                 # there is no information for this coordinate but we must still create a coordinate
-                this_coord=Coord_metadata(UNKNOWN_ID, d, [])
-            this_cid=Read_metadata_thread.create_or_find_matching_coord(this_coord, self.thread_name)
+                this_coord=Coord_metadata(UNKNOWN_ID, d, [], self.thread_name)
+            this_cid=self.create_or_find_matching_coord(this_coord)
             this_cids.append(this_cid)
             this_dimnames.append(d)
         this_dimnames=np.asarray(this_dimnames)
@@ -254,17 +253,20 @@ class Read_metadata_thread(threading.Thread):
                 # add this variables attributes
                 this_var.attributes=[Attribute(attrname,getattr(data[v], attrname)) for attrname in data[v].ncattrs()]
                 # find related coords
-                cdixes=[np.where(this_dimnames==d)[0] for d in data[v].dimensions]
-                found=np.asarray([len(cdixes)>0 for d in data[v].dimensions])
-                ix=np.where(found==False)    
-                if len(ix[0])>0:
-                    raise ValueError('Read_metadata_thread.read_netcdf(): cannot find dimnames for dims {}'.format(ix[0]))
+                if ndims>0:
+                    cdixes=[np.where(this_dimnames==d)[0] for d in data[v].dimensions]
+                    found=np.asarray([len(cdixes)>0 for d in data[v].dimensions])
+                    ix=np.where(found==False)    
+                    if len(ix[0])>0:
+                        raise ValueError(self.thread_name+': Read_metadata_thread.read_netcdf(): cannot find dimnames for dims {}'.format(ix[0]))
+                    else:
+                        cids=[this_cids[c[0]] for c in cdixes]
                 else:
-                    cids=[this_cids[c[0]] for c in cdixes]
-                    if Read_metadata_thread.verbose:
-                        print(self.thread_name, 'Read_metadata_thread.read_netcdf(): creating new variable to check if it exists', this_var.name, 'fid=',this_fid, 'cids=', cids, len(Read_metadata_thread.variables), 'existing vars')
-                    this_var.add_cids_for_fid(this_fid, cids)
-                Read_metadata_thread.create_or_find_matching_variable(this_var,self.thread_name)             
+                    cids=[]
+                if Read_metadata_thread.verbose:
+                    print(self.thread_name, ' Read_metadata_thread.read_netcdf(): creating new variable to check if it exists', this_var.name, 'fid=',this_fid, 'cids=', cids, len(Read_metadata_thread.variables), 'existing vars')
+                this_var.add_cids_for_fid(this_fid, cids)
+                self.create_or_find_matching_variable(this_var)             
 
         return ok
 
@@ -338,7 +340,7 @@ class Read_metadata_thread(threading.Thread):
                                 #print('coord attribute:',attrname, value)
                                 this_coord.add_attribute(attrname, value)
 
-                        this_cid=Read_metadata_thread.create_or_find_matching_coord(this_coord, self.thread_name)
+                        this_cid=self.create_or_find_matching_coord(this_coord)
                         this_coord_cids.append(this_cid)
                         this_coord_names.append(key)
 
@@ -375,7 +377,7 @@ class Read_metadata_thread(threading.Thread):
                     else:
                         this_var.add_cids_for_fid(fid, var_cids)
 
-                    Read_metadata_thread.create_or_find_matching_variable(this_var, self.thread_name)             
+                    self.create_or_find_matching_variable(this_var)             
 
                 elif isinstance(this_group,h5py._hl.group.Group):
                     # this is a group
@@ -398,8 +400,8 @@ class Read_metadata_thread(threading.Thread):
         filepath=get_filepath(self.this_dir.dirpath, self.filename)
 
         try:
-            if verbose:
-                print(self.thread_name,': reading', filepath)
+            if Read_metadata_thread.verbose:
+                print(self.thread_name,' Read_metadata_thread.read_hdf5(): reading', filepath)
             group = h5py.File(filepath, 'r')
             ok=True
 
@@ -416,9 +418,9 @@ class Read_metadata_thread(threading.Thread):
         for attrname in atts:
             value=atts.get(attrname).decode()
             this_file.add_attribute(attrname,value)
-        this_fid=Read_metadata_thread.create_file_entry(this_file, self.thread_name)
+        this_fid=self.create_file_entry(this_file)
 
-        read_keys(this_fid, group)
+        self.read_keys(this_fid, group)
 
         return ok
 

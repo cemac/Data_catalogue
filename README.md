@@ -9,8 +9,6 @@ python build_metadata_db.py indir ftype dbpathname -v
 where indir is the directory you want to catalogue, ftype is nc for netcdf files or hdf5 for hdf5 files and dbpathname is the full pathname of the database file to create.
 If you want to run this on directories of hdf5 files you need to specify the names of the coordinates as it is not always possible to determine that from the metadata itself.
 
-In future I will add the ability to update the database.
-
 metaview.py contains the code to run a GUI to display the contents of the database with various filter options and is run as:
 
 python metaview.py dbpathname -v [coord1 coord2...]
