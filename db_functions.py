@@ -975,7 +975,7 @@ class Variable_metadata:
         must_match_attr_names=['long_name','standard_name','units', 'dataset','statistic', 'time_step', 'var_desc']
         if verbose:
             if len(self.fids)>self.max_fids_cids_to_print:
-                fids_str=f'{self.fids[:int(max_fids_cids_to_print/2)]}...{self.fids[-int(max_fids_cids_to_print/2):]}'
+                fids_str=f'{self.fids[:int(self.max_fids_cids_to_print/2)]}...{self.fids[-int(self.max_fids_cids_to_print/2):]}'
             else:
                 fids_str=f'{self.fids}'
 
@@ -1005,7 +1005,8 @@ class Variable_metadata:
                             # values must match
                             if self.attributes[i].value!=other.attributes[j].value:
                                 if verbose:
-                                    print(thread_name+' Variable_metadata.matches_variable():',self.name, self.attributes[i].name, 'in files', fids_str, 'other in file', other.fids, 'attribute does not match', self.attributes[i].value, other.attributes[j].value)
+                                    print(thread_name+' Variable_metadata.matches_variable():',self.name, self.attributes[i].name, 'in files',
+                                          fids_str, 'other in file', other.fids, 'attribute does not match', self.attributes[i].value, other.attributes[j].value)
                                 matches=False
                                 break
 
@@ -1033,14 +1034,12 @@ class Variable_metadata:
                    if len(other_cids)==1 and other_cids[0]==my_cids[0]:
                        other_matches_type[d]=1
                        other_matches[d]=1
-                       if verbose:
-                           print(thread_name+' Variable_metadata.matches_variable():',self.name, self.vid, 'has exactly the same cid for dim', d)
                    else:
                        if verbose:
                            print(thread_name+' Variable_metadata.matches_variable():',self.name, self.vid, 'has mismatching cid for non multi dim', d, my_cids, other_cids)
                else:
                    if len(my_cids)>self.max_fids_cids_to_print:
-                       this_cids_str=f'{comma} [{my_cids[:int(max_fids_cids_to_print/2)]}...{my_cids[-int(max_fids_cids_to_print/2):]}'
+                       this_cids_str=f'{comma} [{my_cids[:int(self.max_fids_cids_to_print/2)]}...{my_cids[-int(self.max_fids_cids_to_print/2):]}'
                    else:
                        this_cids_str=f'{comma} {my_cids}'
 
