@@ -24,6 +24,7 @@ import numpy as np
 import datetime as dt
 import sqlite3
 from netCDF4 import Dataset
+import h5py as h5py
 from db_functions import *
 
 #-----------------------------------------------------------------------------------
@@ -152,7 +153,7 @@ class Read_metadata_thread(threading.Thread):
         if len(ix[0])==1:
             Read_metadata_thread.variables[ix[0][0]].copy_fid_cids_from_other(this_var)
             if Read_metadata_thread.verbose:
-                print(self.thread_name, ' Read_metadata_thread.create_or_find_matching_variable(): matching variable exists', this_var.name, this_var.vid)
+                print(self.thread_name, ' Read_metadata_thread.create_or_find_matching_variable(): matching variable exists', this_var.name, Read_metadata_thread.variables[ix[0][0]].vid)
 
             this_var=[]
             matches=True
@@ -274,7 +275,6 @@ class Read_metadata_thread(threading.Thread):
     # Add to database the metadata from one hdf5 file
     # Note this is not well tested yet
     #-----------------------------------------------------------------------------------
-    import h5py
     # get the attributes from the data for this variable
     # attributes may tells us about the dimension names of the variable which we can link to coordinates
     def build_attribute_list(self, varname, atts, ndims, this_coord_names, this_coord_cids):
@@ -287,7 +287,7 @@ class Read_metadata_thread(threading.Thread):
             if isinstance(value, bytes):
                 value=value.decode()
                 if attrname=='DimensionNames':
-                    print('dimensions:', value)
+                    print(self.thread_name+' Read_metadata_thread.build_attribute_list():', varname, 'dimensions:', value)
                     my_dimnames=value.split(',')
                     for d in range(ndims):
                             
@@ -295,16 +295,16 @@ class Read_metadata_thread(threading.Thread):
                             ix=np.where(my_dimnames[d]==np.asarray(this_coord_names))
                             if len(ix[0])>0:
                                 var_cids[d]=this_coord_cids[ix[0][0]]
-                                print(self.thread_name+' Read_metadata_thread.build_attribute_list():',varname,'has coord',this_cid,'for dimension',d)
+                                print(self.thread_name+' Read_metadata_thread.build_attribute_list():',varname,'has coord',var_cids[d],'for dimension',d)
                                 dimension_found[d]=1
                             else:
                                 raise ValueError(self.thread_name+' Read_metadata_thread.build_attribute_list(): dimension {} not in coord_names for var {}'.format(d, varname))
 
                         elif attrname!='DIMENSION_LIST' and attrname!='coordinates':
-                            print('var attribute:',attrname, value)
+                            print(self.thread_name+' Read_metadata_thread.build_attribute_list():', varname, 'var attribute:',attrname, value)
                             attribute_list.append(Attribute(attrname,value))
                             
-        return attributes_list, dimension_found
+        return attributes_list, dimension_found, var_cids
         
     #-----------------------------------------------------------------------------------
     # This descends the hierarchy of keys in an hdf5 file and creates coords and variables
@@ -316,7 +316,6 @@ class Read_metadata_thread(threading.Thread):
     #-----------------------------------------------------------------------------------
     def read_keys(self, fid, group):
         keys=group.keys()
-        print(keys)
         this_coord_cids=[]
         this_coord_names=[]
 
@@ -327,35 +326,35 @@ class Read_metadata_thread(threading.Thread):
             if len(kix[0])>0:
                 key=key_names[kix[0][0]]
                 this_group=group[key]
-                print(this_group)
+                print(self.thread_name+' Read_metadata_thread.read_keys(): group=', this_group)
                 if isinstance(this_group, h5py._hl.dataset.Dataset):
                     atts=dict(this_group.attrs)
-                    if key in coord_names:
-                        this_coord=Coord_metadata(UNKNOWN_ID, key, this_group)
-                        for attrname in atts:
-                            value=atts.get(attrname)
-                            if isinstance(value, bytes):
-                                value=value.decode()
-                            if attrname!='REFERENCE_LIST':
-                                #print('coord attribute:',attrname, value)
-                                this_coord.add_attribute(attrname, value)
+                    this_coord=Coord_metadata(UNKNOWN_ID, key, this_group, self.thread_name)
+                    for attrname in atts:
+                        value=atts.get(attrname)
+                        if isinstance(value, bytes):
+                            value=value.decode()
+                        if attrname!='REFERENCE_LIST':
+                            #print('coord attribute:',attrname, value)
+                            this_coord.add_attribute(attrname, value)
 
-                        this_cid=self.create_or_find_matching_coord(this_coord)
-                        this_coord_cids.append(this_cid)
-                        this_coord_names.append(key)
+                    this_cid=self.create_or_find_matching_coord(this_coord)
+                    this_coord_cids.append(this_cid)
+                    this_coord_names.append(key)
 
         # now look at all the other keys
+        this_coord_names=np.asarray(this_coord_names)
+        this_coord_cids=np.asarray(this_coord_cids)
         for key in keys:
-            if key not in coord_names:
+            if key not in this_coord_names:
                 this_group=group[key]
                 print(this_group)
                 if isinstance(this_group, h5py._hl.dataset.Dataset):
                     # this must be a variable
                     ndims=len(this_group.shape)
                     this_var=Variable_metadata(UNKNOWN_ID,this_group.name,ndims)
-                    print(key, 'is variable with shape', this_group.shape)
                     atts=dict(this_group.attrs)
-                    attributes_list, dimension_found=build_attribute_list(this_var.name, atts, ndims, this_coord_names, this_coord_cids)
+                    attributes_list, dimension_found, var_cids=self.build_attribute_list(this_var.name, atts, ndims, this_coord_names, this_coord_cids)
                     this_var.attributes=attributes_list
 
                     # if we haven't found the dimension because there was no attribute called DimensionNames or coordinates
@@ -366,7 +365,7 @@ class Read_metadata_thread(threading.Thread):
                         cix=np.where(dimlen==this_group.shape[d])
                         if len(cix[0])==1:
                             var_cids[d]=this_coords_cids[cix[0][0]]
-                            print('has coord',d,var_cids[d])
+                            print(self.thread_name+'Read_metadata_thread.read+keys():', this_group.name, f'has coord[{d}]',var_cids[d])
                             dimension_found[d]=1
                         else:
                             raise ValueError(self.thread_name+' Read_metadata_thread.read_keys(): cannot work out coordinate for dimension {}'.format(d))
@@ -381,7 +380,7 @@ class Read_metadata_thread(threading.Thread):
 
                 elif isinstance(this_group,h5py._hl.group.Group):
                     # this is a group
-                    read_keys(fid,this_group)
+                    self.read_keys(fid,this_group)
                 else:
                     raise ValueError(self.thread_name+' Read_metadata_thread.read_keys(): Unknown type of this_group {}'.format(type(this_group)))
 
@@ -412,12 +411,10 @@ class Read_metadata_thread(threading.Thread):
             Read_metadata_thread.lock.release()
             return False
 
-        this_file=File_metadata(UNKNOWN_ID, this_dir.did, this_dir.dirpath, self.filename)
+        this_file=File_metadata(UNKNOWN_ID, self.this_dir.did, self.this_dir.dirpath, self.filename)
         # get the global attributes
         atts = dict(group.attrs)
-        for attrname in atts:
-            value=atts.get(attrname).decode()
-            this_file.add_attribute(attrname,value)
+        this_file.global_attributes=[Attribute(attrname,atts.get(attrname).decode()) for attrname in atts]
         this_fid=self.create_file_entry(this_file)
 
         self.read_keys(this_fid, group)

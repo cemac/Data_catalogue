@@ -37,7 +37,7 @@ def create_tables(cur,verbose=False):
     cur.execute("CREATE TABLE Discrete_Coord_Values(cid INTEGER, value REAL)")
     cur.execute("CREATE TABLE Coord_Attributes(cid INTEGER, name TEXT, value)")
     cur.execute("CREATE TABLE Variables(vid INTEGER PRIMARY KEY, name TEXT, ndims INTEGER)")
-    cur.execute("CREATE TABLE Coords_Fids_Of_Variables(vid INTEGER, cid INTEGER, fid INTEGER)")
+    cur.execute("CREATE TABLE Coords_Fids_Of_Variables(vid INTEGER, cid INTEGER, fid INTEGER, dimix INTEGER)")
     cur.execute("CREATE TABLE Var_Attributes(vid INTEGER, name TEXT, value)")
 
 #-----------------------------------------------------------------
@@ -374,7 +374,7 @@ class Coord_metadata:
 
     def __init__(self,*args):
         # there are 2 possible ways to initialise a Coord
-        # init_from_data is initation when reading metadata from file and takes cid, name, coord_values
+        # init_from_data is initation when reading metadata from file and takes cid, name, coord_values and thread_name
         # init_from_database - is initiation from the database and takes row and cur from Coord table
         if len(args)==2: 
             self.init_from_database(*args)
@@ -441,8 +441,10 @@ class Coord_metadata:
             if hasattr(coord_values, 'mask'):
                 # there are occasions when the coord_values are integer but have a mask
                 # in that case we need to convert coord_values to float so we can set the masked values to nan
+                was_int=False
                 if isinstance(coord_values.data[0], np.int64) or isinstance(coord_values.data[0], np.int32) or isinstance(coord_values.data[0], int): # if the values were integer we have to cast to float so we can add nan
-                    print(thread_name, 'Coord_metadata.init_from_data():', self.name, 'coord values type', type(coord_values.data[0]))
+                    was_int=True
+                    coord_type=type(coord_values.data[0])
                     coord_values2=np.zeros(len(coord_values.data))
                     coord_values2[:]=coord_values.data
                 else:
@@ -452,7 +454,11 @@ class Coord_metadata:
                     ix=np.where(coord_values.mask==True)
                     if len(ix[0])>0:
                         coord_values2[ix]=np.nan
-                        print(f'{thread_name}: Coord_metadata.init_from_data(): cid {self.cid} {self.name} has masked coord values')
+                        extra=''
+                        if was_int:
+                            extra=f'was int type {coord_type}'
+                        print(f'{thread_name}: Coord_metadata.init_from_data(): cid {self.cid} {self.name} has masked coord values', extra)
+                             
                 else:
                     # check the mask is false otherwise all data is nan
                     assert(coord_values.mask==False)
@@ -563,11 +569,13 @@ class Coord_metadata:
     # Both should have matching name and attribute names and values
     # This is used to check the coordinates of the variables to see if they are the same type
     # for example a time coordinate that has different values to a different time coordinate matches type
-    # as long as the calendar is the same
+    # as long as the calendar is the same and attributes units and time_origin can be different
     # other is another instance of coord
     #---------------------------------------------------------------------------------------
-    def matches_coord_type(self, other, thread_name):
+    def matches_coord_type(self, other, verbose, thread_name):
         matches=False
+        if self.cid==other.cid:
+            return True # other is the same thing
         if self.name==other.name:
             matches=True
             # now check the attributes - they must both match but don't need to be in the same order
@@ -575,7 +583,8 @@ class Coord_metadata:
             nother_attr=len(other.attributes)
             if nattr!=nother_attr:
                 matches=False
-                print(thread_name+' Coord_metadata.matches_coord_type(): mismatching number of attributes of coords', self.cid, other.cid)
+                if verbose:
+                    print(thread_name+' Coord_metadata.matches_coord_type(): mismatching number of attributes of coords', self.cid, other.cid)
             else:
                 is_time, calendar=self.is_time()
                 for i in range(nattr):
@@ -583,19 +592,22 @@ class Coord_metadata:
                     ix=np.where(name_matches)
                     if len(ix[0])==0:
                         matches=False
+                        if verbose:
+                            print(thread_name+' Coord_metadata.matches_coord_type(): attribute of coord missing in other', self.cid, other.cid, self.name, 'attribute',self.attributes[i].name)
                         break
                     else:
                         # allow times to have different units but they must have the same calendar
-                        if is_time==False or self.attributes[i].name!='units':
+                        if is_time==False or (self.attributes[i].name!='units' and self.attributes[i].name!='time_origin'):
                             # name matches but does value?
                             j=ix[0][0]
                             if self.attributes[i].value!=other.attributes[j].value:
                                 matches=False
+                                if verbose:
+                                    print(thread_name+' Coord_metadata.matches_coord_type(): mismatching attribute value of coords', self.cid, other.cid, self.name, 'attribute',self.attributes[i].name)
                                 break
-                if matches==False:
-                    print(thread_name+' Coord_metadata.matches_coord_type(): mismatching attributes of coords', self.cid, other.cid, self.name, 'attribute index',i)
-        else:
+        elif verbose:
             print(thread_name+' Coord_metadata.matches_coord_type(): mismatching name of coords', self.name, other.name)
+
         return matches
 
     #----------------------------------------------------------------------------------------
@@ -782,10 +794,10 @@ class Coord_metadata:
 #---------------------------------------------------------------------------------------------------------
 class Variable_metadata:
 
-    max_fids_cids_to_print=10
-
+    max_fids_cids_to_print=8
+    
     def __init__(self,*args):
-        # args are row and cur for initiation from database and vid and name for initiation from data
+        # args are row, cur and verbose for initiation from database and vid and name for initiation from data
         if isinstance(args[1], str):
             self.init_from_data(*args)
         else:
@@ -800,7 +812,7 @@ class Variable_metadata:
     #    row is a single row form the SELECT from Variable table
     #    cur is a cursor on the database
     #-------------------------------------------------------------------------------------------
-    def init_from_database(self,row, cur):
+    def init_from_database(self,row, cur, verbose):
         self.vid=row[0]
         self.name=row[1]
         self.ndims=row[2]
@@ -811,42 +823,48 @@ class Variable_metadata:
         # To save space in the database, if cids for a dimension are the same for all files we store
         # a single cid with matching fid as -1 (but only is there is a dimension with different
         # find the matching coords ids and fids
-        res_cids_fids=cur.execute("""SELECT cid, fid FROM Coords_Fids_Of_Variables WHERE vid=?""", (self.vid,)).fetchall()
+        res_cids_fids_dimix=cur.execute("""SELECT cid, fid, dimix FROM Coords_Fids_Of_Variables WHERE vid=?""", (self.vid,)).fetchall()
         # cid fid pairs are read out in the order they were put in,
         # i.e. each dimension will be read for all the fids, if the fid=-1 then only 1 cid will be read for that dimension
-        cids_fids_arr =np.asarray(list(map(list,res_cids_fids)))
-        if len(cids_fids_arr.shape)==2:
-            fids=cids_fids_arr[:,1]
-            cids=cids_fids_arr[:,0]
+        cids_fids_dimix_arr =np.asarray(list(map(list,res_cids_fids_dimix)))
+        if len(cids_fids_dimix_arr.shape)==2:
+            cids=cids_fids_dimix_arr[:,0]
+            fids=cids_fids_dimix_arr[:,1]
+            dixes=cids_fids_dimix_arr[:,2]
             ix=np.where(fids>=0) # don't use the fids that are -1
-            unique_fids=np.unique(np.asarray(fids[ix[0]]))
-            nfids=len(unique_fids)
+            real_fids=np.asarray(fids[ix[0]])
+            nfids=len(np.unique(real_fids))
+            self.fids=np.zeros(nfids, int)
+            if verbose:
+                print('Variable_metadata.init_from_database()', self.vid, self.name, 'fids=',fids, 'cids=', cids, 'dixes', dixes) 
             if self.ndims>0:
                 self.cids=np.zeros((self.ndims,nfids),int)
-                # cid fid pairs are read out in the order they were put in,
-                # i.e. each dimension will be read for all the fids, if the fid=-1 then only 1 cid will be read for that dimension
-
-                r=0
                 for d in range(self.ndims):
-                    if fids[r]==-1:
-                        self.cids[d,:]=cids[r] # there will only be one cid for this fid
-                        r+=1
-                    else:    
-                        self.cids[d,:]=cids[r:r+nfids]
-                        r+=nfids
-                        if len(np.unique(self.cids[d,:]))>1:
+                    ix=np.where(dixes==d)
+                    assert(len(ix[0])>0)
+                    this_fids=fids[ix[0]]
+                    this_cids=cids[ix[0]]
+                    if len(this_fids)==1 and this_fids[0]==-1:
+                        self.cids[d,:]=this_cids[0]
+                        if verbose:
+                            print('Variable_metadata.init_from_database()', self.vid, self.name, 'all files have cid', this_cids, 'for dim', d)
+                    else:
+                        assert(len(this_cids)==nfids)
+                        self.cids[d,:]=this_cids
+                        if verbose:
+                            print('Variable_metadata.init_from_database()', self.vid, self.name, 'cids=', self.cids[d,:], 'for dim', d)
+                        if nfids>1:
                             self.multi_dim=d
-                    self.fids=unique_fids
+                        self.fids=this_fids
             else:
-                self.fids=unique_fids
                 self.cids=cids # will be -1
+                self.fids=fids
         else:
-            print('Variable_metadata.init_from_database() no fids or cids! for var', self.vid, self.name)
+            print('Variable_metadata.init_from_database() no fids or cids or dixes! for var', self.vid, self.name)
+            pdb.set_trace()
             self.cids=[]
             self.fids=[]
              
-        #print('Variable_metadata.init_from_database():', self.name, 'vid=', self.vid, nfids, 'unique fids', self.fids, 'cids=',self.cids, 'multi_dim=',self.multi_dim)
-
         # get the attributes
         self.attributes=[]
         cur.execute("""SELECT name,value FROM Var_Attributes WHERE vid=?""", (self.vid,))
@@ -859,7 +877,7 @@ class Variable_metadata:
     # and its coordinate cids to the existing variable
     # We don't know at the start how many files this variable will appear in so fids and cids are created as lists.
     #-----------------------------------------------------------------------------------------------------
-    def init_from_data(self,vid, name,ndims):
+    def init_from_data(self,vid, name, ndims):
         self.vid=vid
         self.name=name
         self.ndims=ndims
@@ -960,6 +978,7 @@ class Variable_metadata:
                 fids_str=f'{self.fids[:int(max_fids_cids_to_print/2)]}...{self.fids[-int(max_fids_cids_to_print/2):]}'
             else:
                 fids_str=f'{self.fids}'
+
         # and the attribute names should all match
         if self.name==other.name and self.ndims==other.ndims:
             matches=True
@@ -986,7 +1005,7 @@ class Variable_metadata:
                             # values must match
                             if self.attributes[i].value!=other.attributes[j].value:
                                 if verbose:
-                                    print(thread_name+' Variable_metadata.matches_variable():',self.name, self.attributes[i].name, 'attribute does not match', self.attributes[i].value, other.attributes[j].value)
+                                    print(thread_name+' Variable_metadata.matches_variable():',self.name, self.attributes[i].name, 'in files', fids_str, 'other in file', other.fids, 'attribute does not match', self.attributes[i].value, other.attributes[j].value)
                                 matches=False
                                 break
 
@@ -997,47 +1016,63 @@ class Variable_metadata:
         if matches and self.ndims>0:
            # check each dimension
            ncids_per_dim=np.zeros(self.ndims,int)
-           other_matches=np.zeros(self.ndims,int)
-           other_matches_values=np.zeros(self.ndims,int)
+           other_matches_type=np.zeros(self.ndims,int)
+           other_matches=np.zeros(self.ndims,int) # exact match of coord
            cids_str='['
            for d in range(self.ndims):
                my_cids=self.get_cids_for_dim(d)
                other_cids=other.get_cids_for_dim(d)
                ncids_per_dim[d]=len(my_cids)
+               if d==0:
+                   comma=''
+               else:
+                   comma=', '
                if ncids_per_dim[d]==1 and self.multi_dim>=0:
-                   cids_str=cids_str+f', [{my_cids}]'
                    # we know this is not the multi dim
+                   cids_str=cids_str+f'{comma} {my_cids}'
                    if len(other_cids)==1 and other_cids[0]==my_cids[0]:
+                       other_matches_type[d]=1
                        other_matches[d]=1
-                       other_matches_values[d]=1
+                       if verbose:
+                           print(thread_name+' Variable_metadata.matches_variable():',self.name, self.vid, 'has exactly the same cid for dim', d)
+                   else:
+                       if verbose:
+                           print(thread_name+' Variable_metadata.matches_variable():',self.name, self.vid, 'has mismatching cid for non multi dim', d, my_cids, other_cids)
                else:
                    if len(my_cids)>self.max_fids_cids_to_print:
-                       this_cids_str=f', [{my_cids[:int(max_fids_cids_to_print/2)]}...{my_cids[-int(max_fids_cids_to_print/2):]}]'
+                       this_cids_str=f'{comma} [{my_cids[:int(max_fids_cids_to_print/2)]}...{my_cids[-int(max_fids_cids_to_print/2):]}'
                    else:
-                       this_cids_str=f', [{my_cids}]'
+                       this_cids_str=f'{comma} {my_cids}'
 
                    cids_str=cids_str+this_cids_str
+
                    # check the coords match even if the cids dont
                    # other_cids should only have one cid as this is the new variable that we are checking against
                    assert(len(other_cids)==1)
                    # if this is the multi dim then the coord should match in all but values and possibly units if it is time
-                   other_matches[d]=coords[my_cids[0]].matches_coord_type(coords[other_cids[0]], thread_name)
-                   other_matches_values[d]=((coords[my_cids[0]].min_val==coords[other_cids[0]].min_val) and (coords[my_cids[0]].max_val==coords[other_cids[0]].max_val) and (coords[my_cids[0]].nvals==coords[other_cids[0]].nvals))
-           nmatches_values=np.sum(other_matches_values)
+                   other_matches_type[d]=coords[my_cids[0]].matches_coord_type(coords[other_cids[0]], verbose, thread_name)
+                   other_matches[d]=(my_cids[0]==other_cids[0])
            nmatches=np.sum(other_matches)
+           nmatches_type=np.sum(other_matches_type)
            cids_str=cids_str+' ]'
            # all dims should match coord type
-           if nmatches<self.ndims:
+           if nmatches_type<self.ndims:
                if verbose:
-                   print(thread_name+' Variable_metadata.matches_variable():',self.name, self.vid, 'does not match a cid', 'in my files=', fids_str,'my cids=', cids_str, 'other vid', other.vid, 'other files=',other.fids, 'other cids',other.cids)
+                   print(thread_name+' Variable_metadata.matches_variable():',self.name, self.vid, 'does not match a cid in my files=',
+                         fids_str,'my cids=', cids_str, 'other vid', other.vid, 'other files=',other.fids, 'other cids',other.cids,
+                         'other matches type', other_matches_type, 'other matches exactly', other_matches)
                matches=False
            # we can only have one dim that doesn't match coord values
-           if nmatches_values<self.ndims-1:
+           if nmatches<self.ndims-1:
                if verbose:
-                   print(thread_name+' Variable_metadata.matches_variable():',self.name, self.vid, 'too many mismatching cids', 'in my files=', fids_str,'my cids=', cids_str, 'other vid', other.vid, 'other files=',other.fids, 'other cids',other.cids)
+                   print(thread_name+' Variable_metadata.matches_variable():',self.name, self.vid, 'too many mismatching cids in my files=',
+                         fids_str,'my cids=', cids_str, 'other vid', other.vid, 'other files=',other.fids, 'other cids',other.cids,                         
+                         'other matches type', other_matches_type, 'other matches exactly', other_matches)
                matches=False
                                             
         if matches:
+            if self.ndims==0:
+                cids_str=f'[{self.cids}]'
             # all important stuff matches but if file_specific attributes don't match set tp FILE_SPECIFIC_VAL
             for i in file_specific_attribute_indices:
                 self.attributes[i].value=FILE_SPECIFIC_VAL
@@ -1071,14 +1106,13 @@ class Variable_metadata:
                     fid=-1
                     if verbose:
                         print(thread_name, ' Variable_metadata.insert_into_database(): var={} vid={} creating cid={} fid={} for dimension {}'.format(self.name, self.vid, cid, fid, d))
-                    cur.execute("""INSERT INTO Coords_Fids_Of_Variables (vid, cid, fid) VALUES (?,?,?)""", (self.vid, cid, fid))
+                    cur.execute("""INSERT INTO Coords_Fids_Of_Variables (vid, cid, fid, dimix) VALUES (?,?,?,?)""", (self.vid, cid, fid, d))
                 else:
                     if verbose:
                         print(thread_name, ' Variable_metadata.insert_into_database(): var={} vid={} creating cid={} for fids={} for dimension {}'.format(self.name, self.vid, cid, self.fids, d))
                     for f in range(nfids):
                         fid=self.fids[f]
-                        cur.execute("""INSERT INTO Coords_Fids_Of_Variables (vid, cid, fid) VALUES (?,?,?)""", (self.vid, cid, fid))           
-                   
+                        cur.execute("""INSERT INTO Coords_Fids_Of_Variables (vid, cid, fid, dimix) VALUES (?,?,?,?)""", (self.vid, cid, fid, d))
             else:
                 # This is the case where there is a different cid for each fid
                 if verbose:
@@ -1086,15 +1120,16 @@ class Variable_metadata:
                 for f in range(nfids):
                     cid=this_cids[f]
                     fid=self.fids[f]
-                    cur.execute("""INSERT INTO Coords_Fids_Of_Variables (vid, cid, fid) VALUES (?,?,?)""", (self.vid, cid, fid))
+                    cur.execute("""INSERT INTO Coords_Fids_Of_Variables (vid, cid, fid, dimix) VALUES (?,?,?,?)""", (self.vid, cid, fid, d))
         if self.ndims==0:
-            # this is the case where there is not an actual cid but we need to add the fids with -1 for a cid
+            # this is the case where there are no dimensions so no cids but we need to add the fids with -1 for a cid and dix
             cid=int(-1)
+            dix=int(-1)
             if verbose:
                 print(thread_name, ' Variable_metadata.insert_into_database(): var={} vid={} creating cid={} for fids={}'.format(self.name, self.vid, cid, self.fids))
             for f in range(nfids):
                 fid=self.fids[f]
-                cur.execute("""INSERT INTO Coords_Fids_Of_Variables (vid, cid, fid) VALUES (?,?,?)""", (self.vid, cid, fid))
+                cur.execute("""INSERT INTO Coords_Fids_Of_Variables (vid, cid, fid, dimix) VALUES (?,?,?,?)""", (self.vid, cid, fid, dix))
         for att in self.attributes:
            if verbose:
                print(thread_name, ' Variable_metadata.insert_into_database(): Creating attribute for variable', self.vid, self.name, att.name, att.value)

@@ -23,6 +23,8 @@ def main():
         print('dirpath',dirpath)
         print('filename', filename)
         wsplit=filename.split('.')
+        if wsplit[-1]=='HDF5':
+            wsplit[-1]='hdf5'
         ok=Read_metadata_thread.set_ftype(wsplit[-1]) # this can be 'nc' for netcdf files and 'hdf5' for hdf5 files
         if ok==False:
             exit()

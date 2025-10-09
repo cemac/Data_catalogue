@@ -166,7 +166,7 @@ class Database_reader:
         self.active_variables=[None]*nvars # create list of required size to hold variables
         r=0
         for row in var_rows:
-            self.active_variables[r]=Variable_metadata(row, self.cur)
+            self.active_variables[r]=Variable_metadata(row, self.cur, verbose)
             if r % UPDATE_COUNT ==0:
                 update_status('reading variables ({}) {}/{}'.format(self.active_variables[r].name, r,nvars))
             r+=1
