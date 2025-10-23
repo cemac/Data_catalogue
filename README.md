@@ -1,6 +1,6 @@
 # Data_catalogue
 A cataloguer of netcdf/hdf5 files in a directory. Includes code to build a sqlite3 database of metadata and code to run a GUI using tkinter to explore the database.
-The code should work with a standard python3 installation.
+The code works with a conda environment created using the environment.yml file.
 
 build_metadata_db.py contains the code to build the database and is run as:
 
