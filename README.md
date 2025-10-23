@@ -33,6 +33,7 @@ When the variable is selected, previous results are cleared. You then need to cl
 ![ALT TEXT](https://github.com/cemac/Data_catalogue/blob/main/images/single_var_searched.png)
 
 If the database contains metadata from multiple directories, you may select a specific directory from which to view information using the drop down menu by clicking on 'Directory':
+
 ![ALT TEXT](https://github.com/cemac/Data_catalogue/blob/main/images/select_directory.png)
 
 Likewise a filename or part filename may be entered in the 'Filename' entry box to only view variables in certain files.
@@ -42,12 +43,14 @@ To view the attributes of a particular variable, click on the name of the variab
 ![ALT TEXT](https://github.com/cemac/Data_catalogue/blob/main/images/var_attributes.png)
 
 To view the coordinates relating to a dimension of a particular variable, click on the dimension of the variable in the results panel and a pop-up window appears. If the coordinate is the same in all files in which this variable occurs and the coordinate values are evenly spaced (eg. latitude), the pop-up window shows the range of that coordinate:
+
 ![ALT TEXT](https://github.com/cemac/Data_catalogue/blob/main/images/lat_coord.png)
 
 If the coordinate has discrete values (eg. pressure levels), all the values appear in the pop-up window:
 ![ALT TEXT](https://github.com/cemac/Data_catalogue/blob/main/images/discrete_value_coord.png)
 
 If the coordinate varies for each file (eg different times in each file), the pop-up window contains information about the coordinate values in each file:
+
 ![ALT TEXT](https://github.com/cemac/Data_catalogue/blob/main/images/time_multi_coord.png)
 
 To view the information about the files in which a particular variable occurs, click on the word 'files' on the line in the results panel relating to the variable. A list of files, their creation and modification dates and whether they are symbolic links appears in a pop-up window.
