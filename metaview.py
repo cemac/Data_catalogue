@@ -289,11 +289,9 @@ def set_variable(v):
 
     if len(v)==0:
         print('set_variable(): invalid size of variable index', v)
-        pdb.set_trace()
         return
     if v[0]>len(unique_varnames):
         print('set_variable(): variable index chosen is too big', v)
-        pdb.set_trace()
         return
     variable=unique_varnames[v[0]]
     if current_var!=variable:
@@ -739,6 +737,8 @@ nfilters=len(coord_filters)
 # read the database(s)
 wsplit=dbname_or_dir.split('.')
 if wsplit[-1]=='db':
+    if os.path.exists(dbname_or_dir)==False:
+        raise ValueError('No such database '+dbname_or_dir)
     databases.append(Database_reader(dbname_or_dir,verbose))
     unique_dirnames=unique_dirnames+databases[-1].dirpaths
     unique_varnames=unique_varnames+databases[-1].unique_varnames
@@ -750,7 +750,9 @@ else:
                 databases.append(Database_reader(dirpath+'/'+filename,verbose))
                 unique_dirnames=unique_dirnames+databases[-1].dirpaths
                 unique_varnames=unique_varnames+databases[-1].unique_varnames
-
+    if len(databases)==0:
+        raise ValueError('No databases found in '+dbname_or_dir)
+    
 dir_struct=Directory(0, unique_dirnames)
 
 unique_varnames=['*']+list(np.unique(np.asarray(unique_varnames)))
@@ -775,7 +777,7 @@ results_frame.pack(fill=BOTH)
 status_frame = Frame(master=root,relief=RIDGE, borderwidth=5)
 status_frame.pack(fill=BOTH)
 # status bar
-status_bar = Label(master=status_frame, width=100, font=font, fg='black', bg='white',anchor='w',borderwidth=3, relief="ridge")
+status_bar = Label(master=status_frame, width=120, font=font, fg='black', bg='white',anchor='w',borderwidth=3, relief="ridge")
 status_bar.grid(row=0, column=0, sticky='W', pady=2)
 
 #-------------------------------------------------------------------------------------
@@ -808,21 +810,13 @@ ys = Scrollbar(var_frame, orient = 'vertical', command = variable_menu.yview)
 variable_menu.configure(yscrollcommand=ys.set)
 ys.pack(side=RIGHT, fill=Y)
 var_frame.grid(row=1, column=0, sticky='W', pady=2, columnspan=5)
-#variable_mb = Menubutton(setup_frame, text ="Variable",relief=RAISED, width=10, font=font)
-#variable_mb.menu=Menu ( variable_mb, tearoff = 0 )
-#for v in range(len(unique_varnames)):
-#    variable_mb.menu.add_command(label=unique_varnames[v], command=lambda v=v: set_variable(v), font=font)
-#variable_mb.grid(row=1,column=0, sticky='W', pady=2)
-# the label to show what variable has been chosen
-#variable_lab = Label(master=setup_frame, text=unique_varnames[0],width=70,borderwidth=1,anchor='w', relief="solid", font=font)
-#variable_lab.grid(row=1, column=1, sticky='W', pady=2, columnspan=5)
 
 # selecting filename - free form so handles regular expressions
 vcmd_filename = (setup_frame.register(set_filename), '%d')
 filename_lab = Label(master=setup_frame, text='Filename:', anchor='w', font=font)
 filename_lab.grid(row=5, column=0, sticky='W', pady=2)
 filename_entry = Entry(master=setup_frame, width=50, font=font, validate="key", validatecommand=vcmd_filename)
-filename_entry.grid(row=5, column=1, sticky='W', pady=2)
+filename_entry.grid(row=5, column=1, sticky='W', pady=2, columnspan=5)
 #filename_entry.insert(0,'*')
 
 
@@ -861,10 +855,10 @@ for i in range(nfilters):
     
 # search button to kick off search
 searchB = Button(setup_frame, text ="Search", command = search_db, font=font)
-searchB.grid(row=row+1,column=5, sticky='W',pady=2)
+searchB.grid(row=row,column=5, sticky='W',pady=2)
 
 # widget to display results
-results = Text(results_frame, state='disabled', height=20, width=100, font=font)
+results = Text(results_frame, state='disabled', height=20, width=120, font=font)
 ys = Scrollbar(results_frame, orient = 'vertical', command = results.yview)
 results['yscrollcommand'] = ys.set
 ys.pack(side=RIGHT,fill=Y)
@@ -874,7 +868,7 @@ results.pack()
 # kick it all off
 setup_frame.pack()
 results_frame.pack()
-status_frame.pack(side="left")
+status_frame.pack()
 
 root.mainloop()
 
