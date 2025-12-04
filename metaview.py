@@ -149,7 +149,7 @@ class Database_reader:
             coord_filter.is_valid=False
         else:
             coord=Coord_metadata(row, self.cur)
-            is_time,calendar=coord.is_time()
+            is_time,calendar,units=coord.is_time()
         return is_time
         
     def read_variables(self,variable,verbose):
@@ -179,7 +179,8 @@ class Database_reader:
         self.coords[c]=Coord_metadata(row, self.cur)
         (this_str, nlines, max_line_len, min_val)=self.coords[c].get_min_max_delta_str()
         self.coords_str[c]=this_str
-        print('coord', self.coords[c].cid, self.coords[c].name, this_str)
+        is_time, calendar, units=self.coords[c].is_time()
+        print('coord', self.coords[c].cid, self.coords[c].name, this_str, calendar)
         self.coords_nlines[c]=nlines
         self.coords_max_line_len[c]=max_line_len
         self.coords_min_vals[c]=min_val
@@ -214,8 +215,8 @@ class Database_reader:
     def check_valid_variable(self, vix, fids, coord_filters):
         this_var=self.active_variables[vix]        
         # check if all coordinates and fids of this variable are in requested range
-        coords_in_range, nactive_files=this_var.check_fids_and_filters(fids, coord_filters, self.coords)
-        return coords_in_range, nactive_files
+        nactive_files=this_var.check_fids_and_filters(fids, coord_filters, self.coords)
+        return nactive_files
 
 #----------------------------------------------------
 # Directory button has been used to select directory
@@ -351,9 +352,14 @@ def on_validate_time(d, P, s, S):
         if len(s)==10:
             ok=False # got to end of date don't allow more
         else:
-            if len(s)<4:
-                # allow anything for the year
+            if len(s)<3:
+                # allow anything for the year but must be >= 0001
                 ok=S in ['0','1','2','3','4','5','6','7','8','9']
+            elif len(s)==3:
+                if s=='000':
+                    ok=S in ['1','2','3','4','5','6','7','8','9']
+                else:
+                    ok=S in ['0','1','2','3','4','5','6','7','8','9']
             elif len(s)==4 or len(s)==7:
                 # only allow '-'
                 ok=S=='-'
@@ -602,10 +608,10 @@ def show_valid_variable(dbix, fids, vix, ftag, vtag, ctag):
     global verbose
 
     # check if all coordinates and fids of this variable are in requested range
-    coords_in_range, nactive_files=databases[dbix].check_valid_variable(vix, fids, coord_filters)
+    nactive_files=databases[dbix].check_valid_variable(vix, fids, coord_filters)
     if verbose:
-        print('show_valid_variable(): ', databases[dbix].active_variables[vix].name, nactive_files,'active_files')
-    if coords_in_range and nactive_files>0:
+        print('show_valid_variable(): ', databases[dbix].active_variables[vix].vid, databases[dbix].active_variables[vix].name, nactive_files,'active_files')
+    if nactive_files>0:
         this_var=databases[dbix].active_variables[vix]
         var_tag='var_attr{t:d}'.format(t=vtag)
         vtag=vtag+1
@@ -629,7 +635,7 @@ def show_valid_variable(dbix, fids, vix, ftag, vtag, ctag):
         results.insert(INSERT, ') for {n:d} files\n'.format(n=nactive_files),files_tag)
         results.tag_bind(files_tag, '<Button-1>', lambda e,dbix=dbix,vix=vix:popupFilesDetails(e,files_tag,dbix,vix))
 
-    return (coords_in_range and nactive_files>0), ftag, vtag, ctag
+    return (nactive_files>0), ftag, vtag, ctag
 
 #--------------------------------------------------------------------------------
 # Search button pressed

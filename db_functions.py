@@ -15,6 +15,7 @@
 import pdb
 import sqlite3
 from netCDF4 import num2date, date2num
+import cftime
 import numpy as np
 import datetime as dt
 import os
@@ -157,6 +158,7 @@ class File_metadata:
         self.symlink=row[3]
         self.created=row[4]
         self.modified=row[5]
+        self.global_attributes=[]
 
     #---------------------------------------------------------------------------------------
     # initiation when creating database. This sets up all but the global attributes
@@ -334,6 +336,23 @@ class Files_metadata:
 #--------------------------------------------------
 # Coord_metadata holds the metadata for a coordinate
 #--------------------------------------------------
+#----------------------------------------------------------------------------------------
+# useful function to convert a cftime datetime into an epoch timestamp for coords and coord filters
+# inputs:
+#     this_date - a cftime datetime object
+# we use the same calendar to build the base time of 1970-01-01
+# returns:
+#    the number of seconds since 1970-01-01
+#----------------------------------------------------------------------------------------
+def get_epoch_time(this_date):
+    if this_date==None:
+        epoch=np.nan
+    else:
+        epoch_delta=this_date-num2date(0, 'hours since 1970-01-01', calendar=this_date.calendar)
+        epoch=epoch_delta.days*24*3600+epoch_delta.seconds
+
+    return epoch
+
 # Coord_filter holds the data from a filter that is used to select variables by comparing
 # min and max vals with those of the Coordinate
 class Coord_filter:
@@ -348,13 +367,16 @@ class Coord_filter:
         self.min_widget=None # reference to the widget on the GUI for the min val
         self.max_widget=None # reference to the widget on the GUI for the max_val
 
+    # read the value from the widgets
+    # if this is a datetime filter, leave the value as a string, otherwise convert to float
     def get(self):
         min_val=self.min_widget.get()
         if min_val=='':
             self.min_val=None
         else:
             if self.is_time:
-                self.min_val=dt.datetime.strptime(min_val, '%Y-%m-%d').timestamp() # keep as epoch time
+                # leave as a string
+                self.min_val=min_val
             else:
                 self.min_val=float(min_val)
 
@@ -363,10 +385,35 @@ class Coord_filter:
             self.max_val=None
         else:
             if self.is_time:
-                self.max_val=dt.datetime.strptime(max_val, '%Y-%m-%d').timestamp() # keep as epoch time
+                # leave as a string
+                self.max_val=max_val
             else:
                 self.max_val=float(max_val)
 
+    #----------------------------------------------------------------
+    # turn the min and max values as an epoch time
+    # this should only be called if this is a datetime filter
+    # inputs:
+    #    calendar - the calendar to use, this must be the same as the calendar of the Coord we will compare with the filter
+    # returns:
+    #    min and max epoch times (seconds since 1970-01-01)
+    #--------------------------------------------------------
+    def get_epoch_times(self, calendar):
+        assert(self.is_time)
+        if self.min_val==None:
+            min_epoch=None
+        else:
+            min_date=cftime.datetime.strptime(self.min_val, '%Y-%m-%d', calendar=calendar)
+            min_epoch=get_epoch_time(min_date)
+
+        if self.max_val==None:
+            max_epoch=None
+        else:
+            max_date=cftime.datetime.strptime(self.max_val, '%Y-%m-%d', calendar=calendar)
+            max_epoch=get_epoch_time(max_date)
+
+        return min_epoch, max_epoch
+            
 # Coord_metadata holds the data that is in the Coord table
 # Coordinates that hold time information will store the time as the netcdf file did with accompanying units and calendar
 # but when comparing times we will convert to epoch times
@@ -405,6 +452,7 @@ class Coord_metadata:
         self.nvals=row[2]
         self.min_val=row[3]
         self.max_val=row[4]
+        self.allow_add_calendar=True # its useful to be able to add the default calendar when reading database
         # if the data read from netcdf was Nan it will be stored in the database as None but set it to np.nan here
         if self.min_val==None:
             self.min_val=np.nan
@@ -424,6 +472,15 @@ class Coord_metadata:
             if len(val_rows)>0:
                 self.values=np.asarray([val[0] for val in val_rows])
 
+        # in cases where the min and max val are nan in a time coordinate if nvals<=1 then
+        # there is a single value so we can guess that this represents a single datetime that
+        # is the time in units so val to use is 0
+        is_time, calendar, units=self.is_time()
+        if is_time and self.nvals<=1 and np.isfinite(self.min_val)==False and np.isfinite(self.max_val)==False:
+            print('coord', self.cid, self.name, 'assuming min_val datetime is same as in units')
+            self.min_val=0
+            self.max_val=0
+
     #--------------------------------------------------
     # initiate from reading datafile (coord_values can be an empty list)
     #--------------------------------------------------
@@ -433,7 +490,8 @@ class Coord_metadata:
         self.delta=0
         self.nvals=len(coord_values)
         self.values=[]
-
+        self.allow_add_calendar=False
+        
         # sqlite3 doesn't handle integers well - it creates blobs depending on size of integer so best
         # to save data as float
         if self.nvals>0:
@@ -497,12 +555,26 @@ class Coord_metadata:
         elif name=='calendar':
             self.calendar_attrix=len(self.attributes)-1
 
+    #---------------------------------------
+    # get calendar for time coordinates
+    #---------------------------------------
+    def get_calendar(self):
+        if self.calendar_attrix>=0:
+            calendar=self.attributes[self.calendar_attrix].value
+        else:
+            print(self.cid, self.name, 'assuming gregorian calendar')
+            calendar='gregorian'
+            if self.allow_add_calendar:
+                print(self.cid, self.name, 'adding calendar to attributes')
+                self.add_attribute('calendar', calendar)
+        return calendar
     #----------------------------------------------------------------------------------------
     # this coordinate is a time coordinate if it has units that start "months/days/hours/seconds since"
     # it may also have calendar attributes but if not, assume gregorian
     #----------------------------------------------------------------------------------------
     def is_time(self):
         is_time=False
+        units=None
         calendar=None
         if self.units_attrix>=0:
             units=self.attributes[self.units_attrix].value
@@ -512,13 +584,11 @@ class Coord_metadata:
                 # this is how I was testing it but it ought to have since in he units too
             if units.startswith('months since') or units.startswith('days since') or units.startswith('hours since') or units.startswith('seconds since') or self.calendar_attrix>=0:
                 is_time=True
-                if self.calendar_attrix>=0:
-                    calendar=self.attributes[self.calendar_attrix].value
-                else:
-                    calendar='gregorian'
+                calendar=self.get_calendar()
+
             elif suspected_time:
                 print(self.cid, self.name, 'suspected_time but not good units', units)
-        return is_time, calendar
+        return is_time, calendar, units
 
     #----------------------------------------------------------------------------------------
     # check whether this coord has same metadata as given coord
@@ -586,7 +656,7 @@ class Coord_metadata:
                 if verbose:
                     print(thread_name+' Coord_metadata.matches_coord_type(): mismatching number of attributes of coords', self.cid, other.cid)
             else:
-                is_time, calendar=self.is_time()
+                is_time, calendar, units=self.is_time()
                 for i in range(nattr):
                     name_matches=np.asarray([attr.name==self.attributes[i].name for attr in other.attributes])
                     ix=np.where(name_matches)
@@ -636,55 +706,52 @@ class Coord_metadata:
                 if verbose:
                     print(thread_name, ' Coord_metadata.insert_into_database(): creating coord attribute for cid',self.cid, att.name,att.value) 
                 cur.execute("""INSERT INTO Coord_Attributes (cid, name, value) VALUES (?,?,?)""", (self.cid, att.name, att.value))
-                
+
+                           
     #----------------------------------------------------------------------------------------
-    # convert value to an epoch time - should only be called if we know this is a datetime coordinate
+    # convert value to an epoch time using this coords units and calendar
+    # should only be called if we know this is a datetime coordinate
     #----------------------------------------------------------------------------------------
     def get_epoch_time(self, value):
         if np.isnan(value):
             epoch=value
         else:
-            if self.calendar_attrix>=0:
-                calendar=self.attributes[self.calendar_attrix].value
-            else:
-                calendar='gregorian'
-            this_date=num2date(value,units=self.attributes[self.units_attrix].value,calendar=calendar)
-            epoch_delta=this_date-num2date(0, 'hours since 1970-01-01', calendar=calendar)
-            epoch=epoch_delta.days*24*3600+epoch_delta.seconds
-
-        return epoch
-    
-    #----------------------------------------------------------------------------------------
-    # this function returns the min_val, max_val and delta value of this coordinate
-    # If the coordinate is a time coordinate the values are returned as epoch times for min and max
-    # and number of hours for delta.
-    #----------------------------------------------------------------------------------------
-    def get_min_max_delta(self):
-        min_val=self.min_val
-        max_val=self.max_val
-        delta=self.delta
-        is_time, calendar=self.is_time()
-        if is_time:
+            calendar=self.get_calendar()
             units=self.attributes[self.units_attrix].value
-            # convert the values of this coordinate to epoch times to get min max and delta in hours
-            min_val=self.get_epoch_time(self.min_val)
-            max_val=self.get_epoch_time(self.max_val)
-            if self.nvals>1:
-                if self.delta==0:
-                    # we had unevenly spaced dates but calculate mean spacing
-                    delta_epoch=max_val-min_val
-                    delta=delta_epoch/3600 # delta in hours
-                    # average delta is this divided by nvals
-                    delta=delta/self.nvals
-                   
-                else:
-                    next_date=num2date(self.min_val+self.delta,units=units,calendar=calendar)
-                    delta_dates=next_date-num2date(self.min_val,units=units,calendar=calendar)
-                    delta=delta_dates.days*24+delta_dates.seconds/3600 # delta in hours
-
-        return min_val, max_val, delta
-    
-
+            this_date=num2date(value,units=units,calendar=calendar)
+            epoch=get_epoch_time(this_date)
+        return epoch
+              
+    #----------------------------------------------------------------------------------------
+    # function to check whether this coordinate covers any of the range defined by the given
+    # coord_filter
+    #----------------------------------------------------------------------------------------
+    def in_filter_range(self, coord_filter):
+        in_range=True
+        is_time, calendar, units=self.is_time()
+        if is_time:
+            # get filter min and max epoch times based on same calendar as this coord
+            min_flt_val, max_flt_val=coord_filter.get_epoch_times(calendar)
+            # convert the values of this coordinate to epoch times
+            this_cmin=self.get_epoch_time(self.min_val)
+            this_cmax=self.get_epoch_time(self.max_val)
+        else:
+            min_flt_val=coord_filter.min_val
+            max_flt_val=coord_filter.max_val
+            this_cmin=self.min_val
+            this_cmax=self.max_val
+        if min_flt_val!=None:
+            if this_cmax<min_flt_val:
+                # dont need this as it ends before min required
+                print('coord', self.cid, self.name, 'cmax below filter min', this_cmax, min_flt_val)
+                in_range=False
+        if max_flt_val!=None:
+            if this_cmin>max_flt_val:
+                # dont need this as it starts after max required
+                print('coord', self.cid, self.name, 'cmin above filter max', this_cmin, max_flt_val)
+                in_range=False
+        return in_range
+                             
     #----------------------------------------------------------------------------------------
     # function to put min, max and delta values in a string to display converting any time
     # coordinates to datetimes
@@ -702,37 +769,61 @@ class Coord_metadata:
         
         nlines=1
         max_line_len=0
-        is_time, calendar= self.is_time()
+        is_time, calendar, units= self.is_time()
         if is_time:
-            min_val, max_val, delta_hours=self.get_min_max_delta()
-            min_date=dt.datetime.fromtimestamp(min_val)
-            min_str=min_date.strftime('%Y/%m/%d %H:%M')
-
+            if np.isfinite(self.min_val):
+                min_date=num2date(self.min_val, units=units, calendar=calendar)
+                min_str=min_date.strftime('%Y/%m/%d %H:%M')
+            else:
+                min_str='Unknown '+units
+            min_val=self.get_epoch_time(self.min_val) # get min val as an epoch time
             if self.nvals<=1:
                 this_str=min_str
                 max_line_len=len(this_str)
             else:
-                max_date=dt.datetime.fromtimestamp(max_val)
-                max_str=max_date.strftime('%Y/%m/%d %H:%M')
-                #print('get_min_max_delta_str(): coord', self.cid, self.name, min_str, max_str, delta_hours, 'hours', self.nvals, 'values')
-                # check delta time is in sensible units - currently in hours
-                delta_units='hours'
-                delta_time=delta_hours
-                if delta_hours>=24:
-                    delta_days=delta_hours/24
-                    delta_units='days'
-                    delta_time=delta_days
-                    if delta_days>=30:
-                        delta_months=delta_days/30
-                        delta_units='months'
-                        delta_time=delta_months
-               # if we have monthly data the times will not be evenly spaced but we cannot print all of them
-                # we can give range and state every 1 months
-                # if this is not likely to be monthly data we can just print the range and aproximate delta
-                if self.delta==0 and delta_hours<(24*30):
-                    this_str=min_str+' to '+max_str+', {n:d} values approx every {h:.1f}'.format(n=self.nvals, h=delta_time)+' '+delta_units
+                if np.isfinite(self.max_val):
+                    max_date=num2date(self.max_val,units=units,calendar=calendar)
+                    max_str=max_date.strftime('%Y/%m/%d %H:%M')
                 else:
-                    this_str=min_str+' to '+max_str+', {n:d} values every {h:.1f}'.format(n=self.nvals, h=delta_time)+' '+delta_units
+                    max_str='Unknown '+units
+               #print('get_min_max_delta_str(): coord', self.cid, self.name, min_str, max_str, delta_hours, 'hours', self.nvals, 'values')
+                delta_hours=np.nan
+                if np.isfinite(self.min_val):
+                    if self.delta==0 and np.isfinite(self.max_val):
+                        # we had unevenly spaced dates but calculate mean spacing
+                        delta_date=max_date-min_date
+                        delta_hours=delta_date.days*24 + delta_date.seconds/3600 # delta in hours
+                        # average delta is this divided by nvals
+                        delta_hours=delta_hours/self.nvals
+                   
+                    elif self.delta>0:
+                        next_date=num2date(self.min_val+self.delta,units=units,calendar=calendar)
+                        delta_date=next_date-min_date
+                        delta_hours=delta_date.days*24+delta_date.seconds/3600 # delta in hours
+                if np.isfinite(delta_hours):
+                    # check delta time is in sensible units - currently in hours
+                    delta_units='hours'
+                    delta_time=delta_hours
+                    if delta_hours>=24:
+                        delta_days=delta_hours/24
+                        delta_units='days'
+                        delta_time=delta_days
+                        if delta_days>=30:
+                            delta_months=delta_days/30
+                            delta_units='months'
+                            delta_time=delta_months
+                    # if we have monthly data the times will not be evenly spaced
+                    # but we cannot print all of them
+                    # we can give range and state every 1 months
+                    # if this is not likely to be monthly data we can just print
+                    # the range and aproximate delta
+                    if self.delta==0 and delta_hours<(24*30):
+                        this_str=min_str+' to '+max_str+', {n:d} values approx every {h:.1f}'.format(n=self.nvals, h=delta_time)+' '+delta_units
+                    else:
+                        this_str=min_str+' to '+max_str+', {n:d} values every {h:.1f}'.format(n=self.nvals, h=delta_time)+' '+delta_units
+                else:
+                    # unknown delta hours
+                    this_str=min_str+' to '+max_str+', {n:d} values, unknown frequency'.format(n=self.nvals)
                 max_line_len=len(this_str)
         else:
             min_val=self.min_val
@@ -1149,7 +1240,6 @@ class Variable_metadata:
     #    coords - array of all the coords (note as this is all the coords in the database the cids
     #             are the indices into this array)
     # outputs:
-    #    coords_in_range - True/False indicating if whole range is covered for all dimensions
     #    nfids_allowed - the number of files that cover this range
     #----------------------------------------------------------------------------------------
     def check_fids_and_filters(self, fids, coord_filters, coords):
@@ -1162,7 +1252,6 @@ class Variable_metadata:
                 if len(fix[0])>0:
                     allowed_fids[fix[0][0]]=1
         nfids_allowed=int(sum(allowed_fids))
-        coords_in_range=True 
         if len(coord_filters)>0 and nfids_allowed>0:
             for d in range(self.ndims):
                 this_cids=self.get_cids_for_dim(d)
@@ -1174,41 +1263,19 @@ class Variable_metadata:
                     if coord_filters[filter_ix[0][0]].min_val!=None or coord_filters[filter_ix[0][0]].max_val!=None:
                         # we need to check this dimension
                         ncids=len(this_cids)
-                        if ncids==1:
-                            # there is only 1 coord for all files so this coord must cover the range
-                            cmin, cmax, cdelta=coords[this_cids[0]].get_min_max_delta()
-                        else:
-                            # range must be covered by all the cids and need to work out which files are in the range
-                            for c in range(ncids):
-                                if allowed_fids[c]==1:
-                                    this_cmin, this_cmax, cdelta=coords[this_cids[c]].get_min_max_delta()
-                                    if coord_filters[filter_ix[0][0]].min_val!=None:
-                                        if this_cmax<coord_filters[filter_ix[0][0]].min_val:
-                                            # dont need this as it ends before min required
-                                            allowed_fids[c]=0
-                                    if coord_filters[filter_ix[0][0]].max_val!=None:
-                                        if this_cmin>coord_filters[filter_ix[0][0]].max_val:
-                                            # dont need this as it starts after max required
-                                            allowed_fids[c]=0
-                                    # find overall min and max
-                                    if c==0:
-                                         cmin=this_cmin
-                                         cmax=this_cmax
-                                    else:
-                                         cmin=np.amin([cmin,this_cmin])
-                                         cmax=np.amax([cmax,this_cmax])
+                        # work out which files are in the range
+                        for c in range(ncids):
+                            if allowed_fids[c]==1:
+                                in_range=coords[this_cids[c]].in_filter_range(coord_filters[filter_ix[0][0]])
+                                if in_range==False:
+                                    allowed_fids[c]=0
+                                    print(self.vid, self.name, 'coord', this_cids[c],'not in filter range')
 
-                        #check that fids cover the whole range
-                        if coord_filters[filter_ix[0][0]].min_val!=None:
-                            if cmin>coord_filters[filter_ix[0][0]].min_val:                
-                                coords_in_range=False    
-                        if coord_filters[filter_ix[0][0]].max_val!=None:
-                            if cmax<coord_filters[filter_ix[0][0]].max_val:
-                                coords_in_range=False
+
         # save the allowed_fids
         self.allowed_fids=allowed_fids
         nfids_allowed=int(sum(allowed_fids))
-        return coords_in_range, nfids_allowed
+        return nfids_allowed
 
 
     #---------------------------------------------------------------------------

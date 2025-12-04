@@ -16,8 +16,7 @@ import pdb
 def test_coord_creation(thr):
 
     print('--------------------------\nCreating coordinates\n--------------------------')
-    # create a coordinate with no data
-    # time coordinate with calendar, uniform times
+    # create a time coordinate with calendar, uniform times
     times=np.asarray([0,24,48])
     t_units='hours since 2000-01-01'
     coord_time=Coord_metadata(UNKNOWN_ID, 'time', times, thr.thread_name)
@@ -27,7 +26,7 @@ def test_coord_creation(thr):
     assert(len(thr.coords)==1) # it has created a new coord
     thr.coords[0].print()
     assert(thr.coords[0].cid==0)
-    is_time, calendar=thr.coords[0].is_time()
+    is_time, calendar, units=thr.coords[0].is_time()
     assert(is_time)
     assert(thr.coords[0].nvals==3)
     assert(thr.coords[0].min_val==0)
@@ -44,7 +43,7 @@ def test_coord_creation(thr):
     assert(len(thr.coords)==2) # it has created a new coord
     thr.coords[1].print()
     assert(thr.coords[1].cid==1)
-    is_time, calendar=thr.coords[1].is_time()
+    is_time, calendar, units=thr.coords[1].is_time()
     assert(is_time)
     assert(thr.coords[1].nvals==3)
     assert(thr.coords[1].min_val==24)
@@ -60,7 +59,7 @@ def test_coord_creation(thr):
     assert(len(thr.coords)==3)
     thr.coords[2].print()
     assert(thr.coords[2].cid==2)
-    is_time, calendar=thr.coords[2].is_time()
+    is_time, calendar, units=thr.coords[2].is_time()
     assert(is_time)
     assert(thr.coords[2].nvals==3)
     assert(thr.coords[2].min_val==0)
@@ -78,7 +77,7 @@ def test_coord_creation(thr):
     assert(len(thr.coords)==4)
     thr.coords[3].print()
     assert(thr.coords[3].cid==3)
-    is_time, calendar=thr.coords[3].is_time()
+    is_time, calendar, units=thr.coords[3].is_time()
     assert(is_time)
     assert(thr.coords[3].nvals==4)
     assert(thr.coords[3].min_val==0)
@@ -95,7 +94,7 @@ def test_coord_creation(thr):
     assert(len(thr.coords)==5)
     thr.coords[4].print()
     assert(thr.coords[4].cid==4)
-    is_time, calendar=thr.coords[4].is_time()
+    is_time, calendar, units=thr.coords[4].is_time()
     assert(is_time==False)
     assert(thr.coords[4].nvals==4)
     assert(thr.coords[4].min_val==1.0)
@@ -128,6 +127,18 @@ def test_coord_creation(thr):
     assert(thr.coords[6].nvals==0)
     print('coord_no_data passed\n')
     
+    # time coord dimension with no data
+    no_values=[]
+    coord_time_no_data=Coord_metadata(UNKNOWN_ID, 'coord_time_no_data', no_values, thr.thread_name)
+    coord_time_no_data.add_attribute('dimension_attr','no values in this dimension')
+    coord_time_no_data.add_attribute('units',t_units)
+    coord_time_no_data.add_attribute('calendar', 'proleptic_gregorian')
+    thr.create_or_find_matching_coord(coord_time_no_data)
+    assert(len(thr.coords)==8)
+    thr.coords[7].print()
+    assert(thr.coords[7].cid==7)
+    assert(thr.coords[7].nvals==0)
+    print('coord_no_data passed\n')
         
 def test_coords_from_database(thr):
     res=select_all_coords(thr.cur)
@@ -289,9 +300,22 @@ def test_variables_from_database(thr):
         print(f'variable {r} {thr.variables[r].name} in database matches expected\n')
         r+=1
 
-                                    
+def test_epoch_times(time_string):
+    calendar1='gregorian'
+    my_date=cftime.datetime.strptime(time_string, '%Y-%m-%d', calendar=calendar1)
+    epoch_time=get_epoch_time(my_date) # get epoch time
+    calendar2='julian'
+    my_date2=cftime.datetime.strptime(time_string, '%Y-%m-%d', calendar=calendar2)
+    epoch_time2=get_epoch_time(my_date2) # get epoch time
+    print(time_string, my_date.calendar, my_date.strftime('%Y-%m-%d'), 'epoch time=', epoch_time, my_date2.calendar, my_date2.strftime('%Y-%m-%d'),'epoch_time2', epoch_time2, (epoch_time-epoch_time2)/(24*3600), 'days')
+    
 def main():
 
+    test_epoch_times('1980-01-01')
+    test_epoch_times('1900-01-01')
+    test_epoch_times('1400-01-01')
+    test_epoch_times('0001-01-01')
+       
     dbname='unit_test.db'
     if os.path.exists(dbname):
         os.remove(dbname)
